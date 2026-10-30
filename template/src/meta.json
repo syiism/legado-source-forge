@@ -1,0 +1,21 @@
+{
+  "bookSourceComment": null,
+  "bookSourceGroup": null,
+  "bookSourceName": "新书源模板",
+  "bookSourceType": 0,
+  "bookSourceUrl": "https://example.com",
+  "bookUrlPattern": null,
+  "concurrentRate": null,
+  "customButton": false,
+  "customOrder": 0,
+  "enabled": true,
+  "enabledCookieJar": true,
+  "enabledExplore": true,
+  "eventListener": false,
+  "exploreScreen": null,
+  "header": null,
+  "lastUpdateTime": 0,
+  "respondTime": 180000,
+  "variableComment": null,
+  "weight": 0
+}

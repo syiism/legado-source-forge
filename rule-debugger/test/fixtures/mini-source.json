@@ -1,0 +1,18 @@
+[
+  {
+    "bookSourceName": "fixture",
+    "bookSourceUrl": "https://fixture.test",
+    "bookSourceType": 0,
+    "jsLib": "let PREFIX = 'p:';\nfunction wrap(s){ return PREFIX + String(s); }",
+    "searchUrl": "<js>\n\"/search?q=\" + java.encodeURI(key) + \"&page=\" + page\n</js>",
+    "exploreUrl": "<js>\nJSON.stringify([{title: '分类', url: 'https://fixture.test/list?page={{page}}'}])\n</js>",
+    "ruleSearch": {
+      "bookList": "<js>\nJSON.stringify({data: [{name: wrap(key) + '#1'}, {name: wrap(key) + '#2'}]})\n</js>\n$.data",
+      "name": "$.name",
+      "bookUrl": "$.name"
+    },
+    "ruleToc": { "chapterList": "//a" },
+    "ruleContent": { "content": "//div" },
+    "lastUpdateTime": 0
+  }
+]

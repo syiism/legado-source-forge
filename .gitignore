@@ -1,0 +1,7 @@
+node_modules/
+dist/
+*.log
+.DS_Store
+
+# 调试器本地状态可能含凭据
+.legado-debug-state.json
