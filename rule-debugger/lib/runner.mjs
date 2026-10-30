@@ -18,6 +18,18 @@ function readText(value) {
   return text;
 }
 
+// 与 Legado AnalyzeUrl 对齐：data:…;base64, 的 result 是解码后的正文，不是 URI 原文
+function decodeDataUri(text) {
+  const raw = String(text ?? '').trim();
+  const m = /^data:[^,]*;base64,([A-Za-z0-9+/=\s]+)/i.exec(raw);
+  if (!m) return raw;
+  try {
+    return Buffer.from(m[1].replace(/\s+/g, ''), 'base64').toString('utf8');
+  } catch {
+    return raw;
+  }
+}
+
 function parseJsonArg(value, label) {
   if (value === null || value === undefined || value === '') return null;
   const text = readText(value);
@@ -194,7 +206,9 @@ export function run(config) {
     const key = step.key ?? config.defaults?.key ?? '';
     const page = step.page ?? config.defaults?.page ?? 1;
     const baseUrl = step.baseUrl ?? config.defaults?.baseUrl ?? '';
-    const resultInput = step.result !== null && step.result !== undefined ? readText(step.result) : chain;
+    const resultInput = decodeDataUri(
+      step.result !== null && step.result !== undefined ? readText(step.result) : chain,
+    );
 
     sandbox.set('result', resultInput);
     sandbox.set('baseUrl', baseUrl);

@@ -69,7 +69,7 @@ node rule-debugger/bin/legado-debug.mjs [--source <dist.json> | --project <dir>]
 
 | 参数 | 绑定 |
 |------|------|
-| `--result <text\|@file>` | `result`（上一步输出的文本） |
+| `--result <text\|@file>` | `result`（上一步输出的文本；`data:…;base64,` 与 Legado 一致先解码，尾部 `,{...}` 选项忽略） |
 | `--base-url <url>` | `baseUrl` |
 | `--book <json\|@file>` | `book` 对象（普通 JS 对象 + `getVariable/putVariable`） |
 | `--chapter <json\|@file>` | `chapter` |

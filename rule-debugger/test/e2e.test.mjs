@@ -199,6 +199,16 @@ test('--project 构建失败退出码 4', () => {
   assert.match(stderr, /gate failed/);
 });
 
+test('--result 的 data:;base64 URI 按 Legado 语义解码后注入 result', () => {
+  const b64 = Buffer.from('sqtoc:3380555', 'utf8').toString('base64');
+  const { code, stdout } = runCli([
+    '--source', FIXTURE, '--js', 'String(result)', '--result', `data:;base64,${b64},{"type":"sq"}`, '--json',
+  ]);
+  assert.equal(code, 0);
+  const report = json(stdout);
+  assert.equal(report.steps[0].result.text, 'sqtoc:3380555');
+});
+
 test('--help 退出码 0 且列出退出码约定', () => {
   const { code, stdout } = runCli(['--help']);
   assert.equal(code, 0);
