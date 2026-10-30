@@ -115,7 +115,8 @@ node rule-debugger/bin/legado-debug.mjs [--source <dist.json> | --project <dir>]
 - 每步前重置 `result/baseUrl/key/page/book/chapter`；步骤之间共享 `source/cache/cookie`。
 - 结果归一化：`null/undefined → ""`，数组 `join("")`，对象保留原值并在报告中给 JSON；字符串结果若形如 `<url>,{...}` 会额外识别出内嵌的 Legado 请求选项。
 - `java.log/toast/longToast` 与 `console.*` 进入日志流（带步骤号与类型），`cache`/变量写入进 journal，报告里给前后 diff。
-- 非 JS 规则：含 `{{expr}}` 则在沙箱内求值（可用 `key/page/book/chapter/baseUrl`）；否则原样展示。规则文本尾部的 `$.a[0]` 就地求值；`,{...}` 请求选项仅展示；CSS/正则后缀给警告并跳过。
+- 非 JS 规则：含 `{{expr}}` 则在沙箱内求值（可用 `key/page/book/chapter/baseUrl`）；纯 `$.a.b` 字段规则直接对 `result` 求值；其余原样展示。规则文本尾部的 `$.a[0]` 就地求值；`,{...}` 请求选项仅展示；CSS/正则后缀给警告并跳过。
+- `loginUrl` / `jsLib` 即使没有 `@js:` 包装也按 JS 执行；`loginUi` 执行前会拼接 `loginUrl` 脚本（对齐 `BaseSource.getLoginJs`），因此 `loginUi` 可以调用 `loginUrl` 里定义的函数。
 
 ## 保真矩阵
 
@@ -124,7 +125,8 @@ node rule-debugger/bin/legado-debug.mjs [--source <dist.json> | --project <dir>]
 - 规则原子语义：`@js:`、`<js>…</js>`、尾部 JSONPath / 请求选项、`{{}}` 模板；
 - `java.ajax` 的同步语义、`url,{options}` 解析、GET/HEAD 丢弃 body、状态码 ≥400 仍返回；
 - `source.getVariable()` 无参返回原始变量串、带参缺失返回 `""`；`putVariable(null)` 删除；
-- `java.*` 加密/编码、`Packages.java.net.URLEncoder`、`android.util.Base64`。
+- `java.*` 加密/编码、`Packages.java.net.URLEncoder`、`android.util.Base64`；
+- **Java Socket 桥**：`new Packages.java.net.URL(u).openConnection()` 走调试器自己的 HTTP 客户端（cassette/offline/cookie/超时全部生效），配套 `java.io.ByteArrayInputStream/ByteArrayOutputStream`、`java.util.zip.GZIPInputStream`、`getHeaderFields()` 迭代器。直接使用 `HttpURLConnection` 取流的书源因此可以离线或联网调试。
 
 刻意不模拟（写规则时不要依赖）：
 
@@ -134,16 +136,17 @@ node rule-debugger/bin/legado-debug.mjs [--source <dist.json> | --project <dir>]
 | `java.log` 作用域 | 调试器允许 jsLib 顶层调用 `java.log`；Legado 的 jsLib 加载期不一定有 `java` |
 | 数值/相等 | 不模拟 Java `int` 溢出与 Rhino `==` 隐式转换 |
 | 并发 | 不模拟多线程共享 jsLib 全局的竞态 |
-| WebView / 字体 / 压缩包 / 下载 | `webView*`、`startBrowser*`、`openVideoPlayer`、字体、`unzipFile`、`downloadFile` 抛 `UnsupportedApiError`；`getVerificationCode` 返空串并警告一次 |
+| WebView / 字体 / 压缩包 / 下载 | `webView*`、`startBrowserAwait`、字体、`unzipFile`、`downloadFile` 抛 `UnsupportedApiError`；`startBrowser`/`startBrowserDp`/`openVideoPlayer` 记录型 no-op（警告一次，规则可继续返回正文 URL）；`getVerificationCode` 返空串并警告一次 |
 | `htmlFormat` / `t2s` / `s2t` | 透传原值 + 警告一次 |
 | 选择器 | CSS/XPath、HTML 抽取不实现；正则后缀不应用 |
+| 请求选项 `retry` / `timeout` | 只解析不执行：网络层固定用 `--timeout`，不做自动重试 |
 
 ### java.* 支持
 
 - 真实实现：`md5Encode/md5Encode16`、`base64Encode/base64Decode/base64DecodeToByteArray`、`hexEncodeToString/hexDecodeToString/hexDecodeToByteArray`、`digestHex/digestBase64Str`、`HMacHex/HMacBase64`、`createSymmetricCrypto`、`createAsymmetricCrypto`、`encodeURI`、`strToBytes/bytesToStr`（UTF-8）、`timeFormat/timeFormatUTC`、`randomUUID`、`androidId`（固定假值）、`toURL`。
 - 记录型 no-op：`toast/longToast/log/refreshExplore/reLoginView/upLoginData/refreshJSLib/refreshContent/showBrowser/showReadingBrowser/open/openUrl/setContent`。
 - `ajax/get/head/post/connect` 返回 `{body(), code(), headers(), url(), toString()}`；`ajax` 失败时返回错误文本（与 Legado 返回堆栈字符串一致），但 `OFFLINE` / `CASSETTE_MISS` 会抛出以中断调试。
-- `Packages.*`：`java.lang`（String/StringBuilder/Integer/Long/Thread/System）、`java.net`（URLEncoder/URL）、`java.security`（MessageDigest/SecureRandom）、`java.util`（Base64/UUID/Arrays/HashMap）、`java.nio.charset.StandardCharsets`、`android.util.Base64`、`javax.crypto.Cipher` + `SecretKeySpec/IvParameterSpec/GCMParameterSpec`。
+- `Packages.*`：`java.lang`（String/StringBuilder/Integer/Long/Thread/System）、`java.net`（URLEncoder + URL.openConnection → 调试器 HTTP 客户端）、`java.io`（ByteArray 流）、`java.util`（Base64/UUID/Arrays/HashMap/zip.GZIPInputStream）、`java.security`（MessageDigest/SecureRandom）、`java.nio.charset.StandardCharsets`、`android.util.Base64`、`javax.crypto.Cipher` + `SecretKeySpec/IvParameterSpec/GCMParameterSpec`。
 
 ### 加密对照（`help/JsEncodeUtils.kt` 语义）
 
@@ -179,13 +182,21 @@ node rule-debugger/bin/legado-debug.mjs [--source <dist.json> | --project <dir>]
 
 `key = sha256(method + "\n" + url + "\n" + sha256(body))`。响应体超过 256 KB 的外置到 `<cassette>.d/<key>.txt`（条目改记 `bodyFile`）。未命中时会列出 3 条 URL 前缀最近的键；两次回放除耗时外逐字节一致。
 
+## 调试注意事项
+
+- **字段规则要各自喂同一份 book JSON**：`bookinfo.name` 这类规则用 `$.name` 求值，`result` 应是详情数据。多步串联时第 N 步拿到的是第 N-1 步的**字符串输出**，所以 `init → name → author` 不会按预期工作；要么每一步都写 `--result @detail.json`，要么只跑一个 `<js>` 原子一次性取全字段。
+- **HTTP 200 + 空体是上游风控，不是调试器吞了响应**：部分接口在特定出口 IP 上无论签名与否都返回 0 字节（`curl` 直连同样如此）。报告里的 `net[].bytes=0` 即此情形，和真机可能不一致，需换网络或上真机复核。
+- **cassette 按完整 URL 精确匹配**：URL 里带 `_rticket` / 毫秒时间戳等易变参数时，回放会未命中。先用 `--record` 在同一时刻录制并回放，或改用 `--result @fixture` 直接喂已保存的响应体。
+- **`--var` / `--state` 与 `source.getVariable()` 已打通**：按 key 写入的值会同步回整串源变量 JSON，规则里 `JSON.parse(source.getVariable())` 能立即看到。
+- 请求选项允许未加引号的键（`{method:"POST"}`），对齐 Legado 的 GSON 宽松解析。
+
 ## 测试
 
 ```bash
 node --test rule-debugger/test/*.test.mjs
 ```
 
-Node 24 的 `node --test <dir>` 会把目录当 glob 命中再当文件执行，需用上面的通配写法。覆盖：规则提取/后缀矩阵、jsLib 跨步可见与 completion value、日志与 Rhino 提示、cassette 回放确定性、offline/未命中、cookie jar、GBK 解码、md5/base64/HMAC/NIST AES 向量、RSA 往返、CLI 退出码 0/1/2/3/4。
+Node 24 的 `node --test <dir>` 会把目录当 glob 命中再当文件执行，需用上面的通配写法。覆盖：规则提取/后缀矩阵、jsLib 跨步可见与 completion value、日志与 Rhino 提示、cassette 回放确定性、offline/未命中、cookie jar、GBK 解码、md5/base64/HMAC/NIST AES 向量、RSA 往返、Packages Java 桥（URL/流/gzip/头迭代器）、源变量 raw 同步、CLI 退出码 0/1/2/3/4。
 
 ## 安全提示
 

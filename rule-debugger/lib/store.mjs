@@ -5,6 +5,7 @@ export class Store {
     this.loginInfo = new Map(Object.entries(loginInfo));
     this.loginHeader = String(loginHeader ?? '');
     this.ruleMap = new Map(Object.entries(ruleMap));
+    if (!this.raw && this.vars.size) this.raw = JSON.stringify(Object.fromEntries(this.vars));
     this.disk = new Map();
     this.mem = new Map();
     this.events = [];
@@ -39,9 +40,21 @@ export class Store {
     const parsed = this.parsedRaw();
     if (parsed && !Array.isArray(parsed)) {
       this.vars = new Map(Object.entries(parsed).map(([k, v]) => [k, typeof v === 'string' ? v : JSON.stringify(v)]));
+    } else if (!parsed) {
+      this.vars = new Map();
     }
     if (before !== next) this.event('var.raw', { from: before, to: next });
     return next;
+  }
+
+  // Legado 的 source.getVariable() 返回整串源变量 JSON，规则普遍 JSON.parse 后取键；
+  // 因此按 key 写变量时必须同步回 raw，否则 getVariable() 看不到 --var / --state 注入的值。
+  syncRawFromVars() {
+    const next = JSON.stringify(Object.fromEntries(this.vars));
+    if (next === this.raw) return;
+    const before = this.raw;
+    this.raw = next;
+    this.event('var.raw', { from: before, to: next });
   }
 
   putVariable(key, value) {
@@ -49,11 +62,13 @@ export class Store {
     const had = this.vars.has(k);
     if (value === null || value === undefined) {
       this.vars.delete(k);
+      this.syncRawFromVars();
       this.event('var.del', { key: k });
       return had;
     }
     const v = String(value);
     this.vars.set(k, v);
+    this.syncRawFromVars();
     this.event('var.set', { key: k, value: v });
     return true;
   }

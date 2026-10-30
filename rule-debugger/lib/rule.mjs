@@ -58,12 +58,27 @@ export function resolveRule(source, name) {
 
 const REQUEST_OPTIONS = /,\s*(\{[\s\S]*\})\s*$/;
 
+// Legado 用 GSON（lenient）解析请求选项，规则里常见 {method:"POST"} 这种未加引号的键；
+// JSON.parse 严格模式下会整段放弃，按「未加引号的键补引号」再试一次即可对齐。
+export function parseOptionsJson(text) {
+  const raw = String(text ?? '');
+  try {
+    return JSON.parse(raw);
+  } catch {
+    // fallthrough
+  }
+  try {
+    return JSON.parse(raw.replace(/([{,]\s*)([A-Za-z_$][\w$]*)(\s*:)/g, '$1"$2"$3'));
+  } catch {
+    return null;
+  }
+}
+
 function splitRequestOptions(body) {
   const match = REQUEST_OPTIONS.exec(body);
   if (!match) return { body, suffix: '' };
-  try {
-    JSON.parse(match[1]);
-  } catch {
+  const parsed = parseOptionsJson(match[1]);
+  if (!parsed || typeof parsed !== 'object' || Array.isArray(parsed)) {
     return { body, suffix: '' };
   }
   return { body: body.slice(0, match.index), suffix: body.slice(match.index) };
@@ -97,12 +112,7 @@ export function classifySuffix(suffix) {
   const text = String(suffix ?? '').trim();
   if (!text) return { kind: 'none' };
   if (text.startsWith(',')) {
-    let json = null;
-    try {
-      json = JSON.parse(text.slice(text.indexOf('{')));
-    } catch {
-      json = null;
-    }
+    const json = parseOptionsJson(text.slice(text.indexOf('{')));
     return { kind: 'options', text, json };
   }
   if (text.includes('##')) return { kind: 'regex', text };
@@ -196,12 +206,7 @@ export function splitResultOptions(value) {
   if (idx <= 0) return null;
   const url = text.slice(0, idx).trim();
   if (!URL_LIKE.test(url)) return null;
-  let json;
-  try {
-    json = JSON.parse(text.slice(idx + 1));
-  } catch {
-    return null;
-  }
+  const json = parseOptionsJson(text.slice(idx + 1));
   if (!json || typeof json !== 'object' || Array.isArray(json)) return null;
   return { url, json };
 }

@@ -82,8 +82,43 @@ test('变量 put/get 跨步共享，--var 注入默认值', () => {
   assert.equal(report.steps[1].result.text, '1a');
 });
 
-test('--state 写回并在下一次运行读入', () => {
-  const state = path.join(dir, 'state.json');
+test('loginUi 执行前拼接 loginUrl（Legado getLoginJs 语义）', () => {
+  const file = path.join(dir, 'login-source.json');
+  fs.writeFileSync(file, JSON.stringify([{
+    bookSourceName: 'login',
+    bookSourceUrl: 'login-probe',
+    searchUrl: '@js:""',
+    loginUrl: "@js:function who(){ return 'lv'; } source.putVariable('fromLogin', '1');",
+    loginUi: '@js:JSON.stringify([{ title: who(), value: source.getVariable("fromLogin") }])',
+  }]));
+  const { code, stdout, stderr } = runCli(['--source', file, '--rule', 'loginUi', '--json']);
+  assert.equal(code, 0, stderr);
+  const text = json(stdout).steps[0].result.text;
+  assert.deepEqual(JSON.parse(text), [{ title: 'lv', value: '1' }]);
+});
+
+test('纯 JSONPath 字段规则就地求值', () => {
+  const { code, stdout, stderr } = runCli([
+    '--source', FIXTURE, '--rule', 'search.name', '--result', '{"name":"斗破苍穹"}', '--json',
+  ]);
+  assert.equal(code, 0, stderr);
+  const report = json(stdout);
+  assert.equal(report.steps[0].mode, 'plain');
+  assert.equal(report.steps[0].result.text, '斗破苍穹');
+  assert.equal(report.steps[0].suffixApplied.type, 'string');
+});
+
+test('java.startBrowser 记录警告但不中断步骤', () => {
+  const { code, stdout } = runCli([
+    '--source', FIXTURE, '--js', "java.startBrowser('https://m.test/x'); 'after'", '--json',
+  ]);
+  assert.equal(code, 0);
+  const report = json(stdout);
+  assert.equal(report.steps[0].result.text, 'after');
+  assert.ok(report.steps[0].logs.some((l) => l.kind === 'warn' && /startBrowser/.test(l.text)));
+});
+
+test('--state 写回并在下一次运行读入', () => {  const state = path.join(dir, 'state.json');
   const first = runCli(['--source', FIXTURE, '--state', state, '--js', "source.putVariable('token', 't1')", '--json']);
   assert.equal(first.code, 0);
   const saved = json(fs.readFileSync(state, 'utf8'));

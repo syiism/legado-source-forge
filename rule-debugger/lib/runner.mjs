@@ -71,6 +71,16 @@ function describeError(err) {
   };
 }
 
+// Legado 在 getLoginInfoMap() 里把 loginUrl 的脚本拼在 loginUi 前面执行（BaseSource.getLoginJs），
+// loginUi 因此可以调用 loginUrl 里定义的函数；单独 eval loginUi 会报 xxx is not defined。
+function loginScript(loginUrl) {
+  const text = String(loginUrl ?? '');
+  if (!text) return '';
+  if (text.startsWith('@js:')) return text.slice(4);
+  if (text.startsWith('<js>')) return text.slice(4, text.lastIndexOf('<'));
+  return text;
+}
+
 export function run(config) {
   const startedAt = Date.now();
   const { source, project } = loadSource(config);
@@ -119,7 +129,9 @@ export function run(config) {
 
   const { source: sourceApi, cache, cookie, makeBook, makeChapter } = makeSourceBindings({ source, store, jar, hooks });
   const java = makeJavaBindings({ client, store, hooks, sourceApi });
-  const Packages = createPackages();
+  const Packages = createPackages({
+    transport: (method, url, params) => client.request(method, url, params),
+  });
 
   for (const [k, v] of Object.entries(config.defaults?.vars ?? {})) store.putVariable(k, v);
   for (const [k, v] of Object.entries(config.defaults?.logins ?? {})) store.setLogin(k, v);
@@ -159,7 +171,9 @@ export function run(config) {
   const sandbox = new Sandbox({ jsLib: source?.jsLib || '', globals, timeout: 300000 });
 
   const steps = [];
-  let chain = '';
+  let chain = config.defaults?.result !== null && config.defaults?.result !== undefined
+    ? readText(config.defaults.result)
+    : '';
   let exitCode = 0;
 
   for (let i = 0; i < config.steps.length; i++) {
@@ -220,6 +234,14 @@ export function run(config) {
         }
         atom = extractAtom(field.value);
         record.label = field.label;
+        // loginUrl / jsLib 本身就是 JavaScript（Legado getLoginJs 直接 eval），没有 @js: 包装也要执行
+        if ((field.label === 'loginUrl' || field.label === 'jsLib') && atom.mode === 'plain') {
+          atom = { mode: 'js', lead: '', body: atom.raw, suffix: '', wrapped: false };
+        }
+        if (field.label === 'loginUi' && atom.mode === 'js') {
+          const prelude = loginScript(source?.loginUrl);
+          if (prelude) atom = { ...atom, body: `${prelude}\n${atom.body}` };
+        }
       } else if (step.kind === 'js-file') {
         atom = { mode: 'js', body: fs.readFileSync(step.value, 'utf8'), suffix: '' };
         record.label = `js:${step.value}`;
@@ -253,6 +275,20 @@ export function run(config) {
         }
       } else if (atom.mode === 'template') {
         rawValue = renderTemplate(atom.raw, (expr) => sandbox.runExpression(expr));
+        chainValue = toChain(rawValue);
+      } else if (atom.mode === 'plain' && String(atom.raw).trim().startsWith('$')) {
+        // 纯 JSONPath 字段规则：以当前 result 为输入就地求值
+        const applied = applySuffix(resultInput, String(atom.raw).trim());
+        if (applied.error) {
+          hooks.warn(applied.error);
+          rawValue = atom.raw;
+        } else if (applied.value === undefined) {
+          hooks.warn(`JSONPath ${String(atom.raw).trim()} 未命中当前 result`);
+          rawValue = '';
+        } else {
+          rawValue = applied.value;
+          record.suffixApplied = describeValue(applied.value);
+        }
         chainValue = toChain(rawValue);
       } else {
         rawValue = atom.raw;

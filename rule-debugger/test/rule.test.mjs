@@ -85,6 +85,16 @@ test('字段定位：简写 / 组.字段 / 顶层', () => {
   assert.throws(() => resolveRule(source, 'badgroup.x'), UsageError);
 });
 
+test('请求选项容忍未加引号的键（Legado GSON 宽松解析）', () => {
+  const parsed = classifySuffix(',{method:"POST", body:"{}",headers:{"content-type":"application/json"}}');
+  assert.equal(parsed.kind, 'options');
+  assert.equal(parsed.json.method, 'POST');
+  assert.equal(parsed.json.headers['content-type'], 'application/json');
+  const split = splitResultOptions('https://x.test/api,{method:"POST", body:"{\\"a\\":1}"}');
+  assert.equal(split.url, 'https://x.test/api');
+  assert.equal(split.json.method, 'POST');
+});
+
 test('splitResultOptions 识别返回值里内嵌的请求选项', () => {
   const gy = splitResultOptions('data:;base64,eyJrZXkiOiLmlpfnoLToi43nqbkiLCJ0YWIiOiLlsI/or7QiLCJzb3VyY2VzS2V5Ijoi5YWo6YOoIiwicGFnZSI6MSwiZGlzYWJsZWRfc291cmNlcyI6IjAifQ==,{"type":"gysearch"}');
   assert.equal(gy.json.type, 'gysearch');

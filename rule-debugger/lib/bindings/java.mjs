@@ -1,5 +1,6 @@
 import fs from 'node:fs';
 import { randomUUID } from 'node:crypto';
+import { parseOptionsJson } from '../rule.mjs';
 import {
   md5Encode,
   md5Encode16,
@@ -80,13 +81,9 @@ function splitUrlOptions(text) {
   const raw = String(text);
   const idx = raw.lastIndexOf(',{');
   if (idx < 0) return { url: raw, options: {} };
-  try {
-    const parsed = JSON.parse(raw.slice(idx + 1));
-    if (parsed && typeof parsed === 'object' && !Array.isArray(parsed)) {
-      return { url: raw.slice(0, idx), options: parsed };
-    }
-  } catch {
-    // 不是请求选项，按原 URL 处理
+  const parsed = parseOptionsJson(raw.slice(idx + 1));
+  if (parsed && typeof parsed === 'object' && !Array.isArray(parsed)) {
+    return { url: raw.slice(0, idx), options: parsed };
   }
   return { url: raw, options: {} };
 }
@@ -269,13 +266,23 @@ export function makeJavaBindings({ client, store, hooks, sourceApi }) {
       return '';
     },
 
-    startBrowser: unsupported('java.startBrowser', '需要真机 WebView，请在真机上验证'),
-    startBrowserAwait: unsupported('java.startBrowserAwait', '需要真机交互'),
-    startBrowserDp: unsupported('java.startBrowserDp', '需要真机交互'),
+    // 真机 UI 类调用：fire-and-forget 的改为记录型 no-op，避免把已经成功的正文规则整条判失败
+    startBrowser: () => {
+      warnOnce('java.startBrowser', 'java.startBrowser 需要真机 WebView，已记录并跳过');
+      return '';
+    },
+    startBrowserAwait: unsupported('java.startBrowserAwait', '返回值依赖真机交互（cookie/URL），离线无法模拟'),
+    startBrowserDp: () => {
+      warnOnce('java.startBrowserDp', 'java.startBrowserDp 需要真机 WebView，已记录并跳过');
+      return '';
+    },
     webView: unsupported('java.webView', '需要真机 WebView'),
     webViewGetSource: unsupported('java.webViewGetSource', '需要真机 WebView'),
     webViewGetOverrideUrl: unsupported('java.webViewGetOverrideUrl', '需要真机 WebView'),
-    openVideoPlayer: unsupported('java.openVideoPlayer', '需要真机播放器'),
+    openVideoPlayer: () => {
+      warnOnce('java.openVideoPlayer', 'java.openVideoPlayer 需要真机播放器，已记录并跳过');
+      return '';
+    },
     downloadFile: unsupported('java.downloadFile', '需要真机下载器'),
     cacheFile: unsupported('java.cacheFile', '需要真机缓存目录'),
     importScript: unsupported('java.importScript', '离线不加载外部脚本'),
