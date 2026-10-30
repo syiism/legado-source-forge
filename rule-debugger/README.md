@@ -109,8 +109,12 @@ node rule-debugger/bin/legado-debug.mjs [--source <dist.json> | --project <dir>]
 
 ## 运行时模型
 
-- 上下文：`vm.createContext(Object.create(null))`，注入 `java/source/cache/cookie/book/chapter/key/page/baseUrl/result/src/title/infoMap/Packages/console/print`。无 `require/process/Buffer`。
-- **jsLib 只加载一次**（对齐 Legado `SharedJsScope`）：顶层 `let/const/function` 跨步骤可见。
+- **两级作用域（对齐 Legado `SharedJsScope`）**：
+  - 共享作用域 = vm 全局，只放 `Packages/console/print` 与 Rhino 风格的 `java`（`JavaPackage`，未知成员是包对象，调用即报错）。jsLib 加载在这里，加载期看不到 `java/source/result/...`。
+  - 规则作用域 = 每步新建 `Object.create(globalThis)`，持有 `java/source/cache/cookie/book/chapter/key/page/baseUrl/result/src/title/infoMap/...`；原子代码在该作用域内用 `with` 执行，`this` 也指向它。
+  - 因此 jsLib 函数里的自由 `java` 是 `JavaPackage`（真机同样如此），规则原子里的 `java` 才是 `JsExtensions`；jsLib 顶层函数被原子直接调用时会被包一层，令 `this` = 规则作用域（对齐 Rhino 的调用点作用域），jsLib 内部互相调用则 `this` = 共享作用域。
+  - 无 `require/process/Buffer`。
+- **jsLib 只加载一次**：顶层 `let/const/function` 跨步骤可见（`let/const` 是全局词法绑定，不是全局对象属性）。
 - **每一步用 `eval` 包一层**：`(function(){ return eval(<code>) })()`，利用 completion value 模拟 Rhino「最后一条表达式即返回值」，同时把原子内的 `let/const` 限制在该步，避免多步重复声明冲突。
 - 每步前重置 `result/baseUrl/key/page/book/chapter`；步骤之间共享 `source/cache/cookie`。
 - 结果归一化：`null/undefined → ""`，数组 `join("")`，对象保留原值并在报告中给 JSON；字符串结果若形如 `<url>,{...}` 会额外识别出内嵌的 Legado 请求选项。
@@ -133,7 +137,10 @@ node rule-debugger/bin/legado-debug.mjs [--source <dist.json> | --project <dir>]
 | 差异 | 说明 |
 |------|------|
 | Java String 包装 | 返回的 `result` 是 JS 字符串：`.length` 是数字而非方法引用，`.slice` 可用；Rhino 下常见的 `result.length()` 会报错，这里在错误里追加提示 |
-| `java.log` 作用域 | 调试器允许 jsLib 顶层调用 `java.log`；Legado 的 jsLib 加载期不一定有 `java` |
+| jsLib 里用宿主 `java` | 共享作用域的 `java` 是 `JavaPackage`（与设备一致）。想在 jsLib 里用 `java.*` 扩展，必须在规则原子入口注入并在 jsLib 内保存引用（例如 `sqUseHost(java, source)`），否则调用会报 `Cannot call property … in object [JavaPackage java]` |
+| `this` 的近似 | jsLib 顶层函数被原子**直接调用**时 `this` = 规则作用域；jsLib 函数之间互相调用时 `this` = 共享作用域。用 `const/let` 定义的函数无法被包装，原子直接调用时 `this` 落在共享作用域（函数声明与 `var f = function` 不受影响） |
+| `console` / `print` | 调试器额外提供（设备 Rhino 的 SharedJsScope 里没有），方便打印 |
+| 隐式全局 | jsLib 里未声明就赋值的新全局在设备上会因 `preventExtensions()` 失败，调试器不会拦截 |
 | 数值/相等 | 不模拟 Java `int` 溢出与 Rhino `==` 隐式转换 |
 | 并发 | 不模拟多线程共享 jsLib 全局的竞态 |
 | WebView / 字体 / 压缩包 / 下载 | `webView*`、`startBrowserAwait`、字体、`unzipFile`、`downloadFile` 抛 `UnsupportedApiError`；`startBrowser`/`startBrowserDp`/`openVideoPlayer` 记录型 no-op（警告一次，规则可继续返回正文 URL）；`getVerificationCode` 返空串并警告一次 |
@@ -184,6 +191,7 @@ node rule-debugger/bin/legado-debug.mjs [--source <dist.json> | --project <dir>]
 
 ## 调试注意事项
 
+- **`Cannot call property … in object [JavaPackage java]`**：jsLib 里的 `java` 是 Rhino `JavaPackage`，不是规则层的 `java.*` 扩展。在规则原子入口把宿主注入 jsLib（如 `sqUseHost(java, source)` 保存引用），再由 jsLib 内部使用；直接在 jsLib 里写 `java.ajax/md5Encode/...` 在真机同样会失败。
 - **字段规则要各自喂同一份 book JSON**：`bookinfo.name` 这类规则用 `$.name` 求值，`result` 应是详情数据。多步串联时第 N 步拿到的是第 N-1 步的**字符串输出**，所以 `init → name → author` 不会按预期工作；要么每一步都写 `--result @detail.json`，要么只跑一个 `<js>` 原子一次性取全字段。
 - **HTTP 200 + 空体是上游风控，不是调试器吞了响应**：部分接口在特定出口 IP 上无论签名与否都返回 0 字节（`curl` 直连同样如此）。报告里的 `net[].bytes=0` 即此情形，和真机可能不一致，需换网络或上真机复核。
 - **cassette 按完整 URL 精确匹配**：URL 里带 `_rticket` / 毫秒时间戳等易变参数时，回放会未命中。先用 `--record` 在同一时刻录制并回放，或改用 `--result @fixture` 直接喂已保存的响应体。

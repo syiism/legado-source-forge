@@ -1,6 +1,7 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { Sandbox, rhinoHint } from '../lib/sandbox.mjs';
+import { createPackages } from '../lib/packages.mjs';
 
 test('jsLib 顶层 let/function 跨步可见', () => {
   const sb = new Sandbox({ jsLib: "let PREFIX = 'p:'; function wrap(v){ return PREFIX + String(v); }" });
@@ -63,6 +64,66 @@ test('异常栈保留，rhinoHint 给出 Java String 提示', () => {
 test('rhinoHint 覆盖 Packages 缺失与未实现 API', () => {
   assert.ok(rhinoHint(new Error('Packages is not defined')).some((h) => h.includes('Packages')));
   assert.ok(rhinoHint(new Error('java.webView is not a function')).some((h) => h.includes('未在调试器中实现')));
+});
+
+test('jsLib 加载期与函数内看不到规则层 java（只有 Rhino JavaPackage）', () => {
+  const sb = new Sandbox({
+    jsLib: `function loadType(){ return typeof java; }
+      function useJava(){ return java.md5Encode('a'); }
+      let atLoad = typeof source;`,
+    globals: {
+      java: { md5Encode: () => 'HOST' },
+      source: { getVariable: () => '' },
+    },
+  });
+  assert.equal(sb.runAtom('loadType()'), 'object');
+  assert.equal(sb.runAtom('atLoad'), 'undefined');
+  assert.throws(() => sb.runAtom('useJava()'), /\[JavaPackage java\]/);
+  assert.equal(sb.runAtom("java.md5Encode('a')"), 'HOST');
+});
+
+test('jsLib 函数经 this 访问规则层绑定（调用点作用域）', () => {
+  const sb = new Sandbox({
+    jsLib: `function viaThis(){ return this.java.md5Encode('a') + ':' + this.key; }
+      function outer(){ return inner(); }
+      function inner(){ return typeof this.source; }`,
+    globals: {
+      java: { md5Encode: () => 'HOST' },
+      source: { getVariable: () => '' },
+      key: 'k',
+    },
+  });
+  assert.equal(sb.runAtom('viaThis()'), 'HOST:k');
+  // jsLib 内部互相调用时 this 是共享作用域，看不到 source，与设备一致
+  assert.equal(sb.runAtom('outer()'), 'undefined');
+});
+
+test('jsLib 经入口注入宿主后可跨函数使用 java/source', () => {
+  const sb = new Sandbox({
+    jsLib: `var HOST = null;
+      function useHost(j, s){ HOST = { j: j, s: s }; }
+      function inner(){ return HOST.j.md5Encode('a') + ':' + HOST.s.getVariable(); }`,
+    globals: {
+      java: { md5Encode: () => 'H' },
+      source: { getVariable: () => 'V' },
+    },
+  });
+  assert.equal(sb.runAtom("useHost(java, source), inner()"), 'H:V');
+});
+
+test('jsLib 内可使用 Packages 与 java.lang', () => {
+  const sb = new Sandbox({
+    jsLib: `function fromPackages(s){ return String(new Packages.java.lang.String(s).toString()); }
+      function fromJavaPackage(s){ return java.lang.String(s).toString(); }`,
+    globals: { Packages: createPackages() },
+  });
+  assert.equal(sb.runAtom("fromPackages('x')"), 'x');
+  assert.equal(sb.runAtom("fromJavaPackage('y')"), 'y');
+});
+
+test('rhinoHint 覆盖 SharedJsScope 的 JavaPackage 调用', () => {
+  const hints = rhinoHint(new Error('Cannot call property md5Encode in object [JavaPackage java]'));
+  assert.ok(hints.some((h) => h.includes('SharedJsScope')), hints.join('\n'));
 });
 
 test('沙箱不暴露 require / process / Buffer', () => {
