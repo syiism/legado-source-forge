@@ -6,7 +6,11 @@
 - 已有书源：`node unbuild.mjs <书源.json> --verify`，拆完立即回环比对。
 - 字段表对齐官方实体全集：`SearchRule` / `ExploreRule` / `BookInfoRule` / `TocRule` / `ContentRule` / `ReviewRule`（依据官方实体源码 `raw/legado-E/entities/rule/*.kt` 与「阅读书源规则查询知识库」的字段表）。
 
-本目录不做行号级拆分（不绑定某一份原件）；需要「逐字节还原某成品 + 大段 body 按行切块」的工程，参见原 `legado-work` 仓库的「红果短剧漫剧」工程。
+本目录不做行号级拆分（不绑定某一份原件）。需要「逐字节还原某成品 + 大段 body 按行切块」时，按以下 `CORE` / `CONTENT` 约定自行扩展：
+
+- `layout.mjs`：`CORE = [{ file, from, to }]` 记录 `jsLib` 各段的 1-based 行区间；`CONTENT = { segments: [{ file, from, to }], assets: [{ var, file, line, pre }] }` 记录 `ruleContent.content`（去掉 `@js:\n`）的正文分段与 `var X = 'base64';` 资产行。
+- `unbuild`：按行号切片写入 `src/core/` 与 `src/content/`，资产行 base64 解码为明文；各段行号须完整覆盖、互不重叠，拼回后与原件逐字节比对。
+- `build`：`jsLib` 按 `CORE` 顺序 `join('\n')`；`content` 由正文段拼接、资产重新编码后插回 `line` 位置，再套 `@js:\n`。
 
 ## 一、快速开始
 
@@ -153,7 +157,7 @@ node unbuild.mjs src.json --verify # 拆完立即回环
 
 ## 六、模板自检
 
-> 以下为模板在原 `legado-work` 仓库中对真实书源的验证记录；相关书源工程不在本仓库。
+> 以下为模板对真实书源的验证记录；相关书源工程不在本仓库。
 
 - 红果短剧漫剧（540,049 字符）：`@js:`、`<js>…ul li`、`<js>…$[*]`、裸 `callBackJs` 混合形态 → 逐字节回环。
 - syiism 聚合（303,554 字符，`loginUi` 为真实 `@js:` 长脚本）→ 逐字节回环；该源后续也用本模板维护。
@@ -176,6 +180,6 @@ node unbuild.mjs src.json --verify # 拆完立即回环
 ## 七、注意事项
 
 1. 模板不内置任何站点签名/凭据；真实源请把设备常量、Cookie 放进 `src/jslib.js` 或 `src/meta.json` 的 `header`，并注意分发前脱敏。
-2. `jsLib` 为整体文件；若需要按行分段维护，复制原仓库「红果短剧漫剧」工程的 `layout.mjs` + `CORE/CONTENT` 方案。
+2. `jsLib` 为整体文件；若需要按行分段维护，按文首的 `CORE` / `CONTENT` 约定扩展 `layout.mjs`、`build.mjs`、`unbuild.mjs`。
 3. `unbuild` 会清空 `src/{shell,optional,rules}` 并按输入重建；不要把手工改动留在这三个目录外又期望它保留。
 4. 发布前改 `lastUpdateTime`（`src/meta.json`），`bookSourceName` 决定产物文件名。
