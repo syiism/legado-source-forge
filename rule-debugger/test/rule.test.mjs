@@ -10,6 +10,12 @@ import {
   renderTemplate,
   hasTemplate,
   splitResultOptions,
+  splitPutRule,
+  splitTrailingJson,
+  evaluateRule,
+  evaluateRuleString,
+  evaluateRuleList,
+  looksLikeJsonPath,
   UsageError,
 } from '../lib/rule.mjs';
 
@@ -48,10 +54,37 @@ test('模板与普通值', () => {
   assert.equal(extractAtom('https://x.test/{{page}}').mode, 'template');
   assert.equal(extractAtom('https://x.test/list').mode, 'plain');
   assert.equal(hasTemplate('a{{key}}b'), true);
-  assert.equal(renderTemplate('a{{ 1 + 2 }}b{{nope()}}c', (expr) => {
-    if (expr.startsWith('nope')) throw new Error('boom');
-    return eval(expr);
-  }), 'a3bc');
+  assert.equal(renderTemplate('a{{ 1 + 2 }}b', (expr) => (expr === '1 + 2' ? 3 : '')), 'a3b');
+  assert.throws(() => renderTemplate('{{nope()}}', () => {
+    throw new Error('boom');
+  }), /boom/);
+});
+
+test('@put 在原子提取时剥离并保留映射', () => {
+  const atom = extractAtom('book.title@put:{"bid":"$.id"}');
+  assert.equal(atom.mode, 'plain');
+  assert.equal(atom.raw, 'book.title');
+  assert.deepEqual(atom.putMap, { bid: '$.id' });
+});
+
+test('规则求值：裸 JSONPath / $ / ## 正则', () => {
+  const data = { book: { title: '斗破', tags: [{ title: 'a' }, { title: 'b' }] } };
+  assert.equal(evaluateRule(data, 'book.title'), '斗破');
+  assert.equal(evaluateRule(data, '$.book.title'), '斗破');
+  assert.deepEqual(evaluateRule(data, 'book.tags[*].title'), ['a', 'b']);
+  assert.equal(evaluateRuleString(data, 'book.tags[*].title##\\s##,'), 'a,b');
+  assert.equal(evaluateRuleList(data, 'book.tags[*].title').join('|'), 'a|b');
+  assert.equal(looksLikeJsonPath('data.books'), true);
+  assert.equal(looksLikeJsonPath('https://x.test/a'), false);
+  assert.equal(evaluateRule('not json', 'book.title'), 'book.title');
+});
+
+test('尾部请求选项允许逗号后空白', () => {
+  const split = splitTrailingJson('https://x.test/a, {"method":"POST"}');
+  assert.equal(split.prefix, 'https://x.test/a');
+  assert.equal(split.json.method, 'POST');
+  assert.equal(splitResultOptions('https://x.test/a, {"type":"qm"}').json.type, 'qm');
+  assert.equal(splitPutRule('x@put:{bid:"$.id"}').putMap.bid, '$.id');
 });
 
 test('JSONPath 子集', () => {

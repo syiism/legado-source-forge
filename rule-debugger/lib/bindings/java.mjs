@@ -1,6 +1,6 @@
 import fs from 'node:fs';
 import { randomUUID } from 'node:crypto';
-import { parseOptionsJson } from '../rule.mjs';
+import { splitTrailingJson, evaluateRuleString, evaluateRuleList } from '../rule.mjs';
 import {
   md5Encode,
   md5Encode16,
@@ -74,18 +74,14 @@ function normalizeAjaxOptions(options) {
     headers: headerObject(options.headers),
     body: options.body,
     charset: options.charset,
+    type: options.type,
   };
 }
 
 function splitUrlOptions(text) {
   const raw = String(text);
-  const idx = raw.lastIndexOf(',{');
-  if (idx < 0) return { url: raw, options: {} };
-  const parsed = parseOptionsJson(raw.slice(idx + 1));
-  if (parsed && typeof parsed === 'object' && !Array.isArray(parsed)) {
-    return { url: raw.slice(0, idx), options: parsed };
-  }
-  return { url: raw, options: {} };
+  const split = splitTrailingJson(raw);
+  return split ? { url: split.prefix, options: split.json } : { url: raw, options: {} };
 }
 
 function serializeBody(body) {
@@ -104,7 +100,7 @@ function makeResponse(res) {
   };
 }
 
-export function makeJavaBindings({ client, store, hooks, sourceApi }) {
+export function makeJavaBindings({ client, store, hooks, sourceApi, currentResult = () => '' }) {
   const onceWarn = new Set();
   const warnOnce = (api, message) => {
     if (onceWarn.has(api)) return;
@@ -140,6 +136,7 @@ export function makeJavaBindings({ client, store, hooks, sourceApi }) {
       // Legado 的 AnalyzeUrl 对 GET/HEAD 忽略 body（OkHttp 不允许 GET 带体）
       body: httpMethod === 'POST' ? serializeBody(body) : '',
       charset: extra.charset ?? options.charset,
+      type: extra.type ?? options.type,
     };
     return client.request(httpMethod, url, params);
   };
@@ -152,6 +149,11 @@ export function makeJavaBindings({ client, store, hooks, sourceApi }) {
       hooks.warn(`网络请求失败：${err.message}`);
       return { error: err };
     }
+  };
+
+  const httpResponse = (method, url, extra) => {
+    const result = performSafe(method, url, extra);
+    return makeResponse(result.res ?? { code: 0, headers: {}, body: result.error?.message ?? '', url: String(url) });
   };
 
   const java = {
@@ -178,7 +180,19 @@ export function makeJavaBindings({ client, store, hooks, sourceApi }) {
 
     getSource: () => sourceApi,
     put: (key, value) => store.put(key, value),
-    get: (key) => store.get(key),
+    // Legado 有两个 get 重载：get(key) 读变量，get(url, headers) 发 HTTP 请求。
+    get(first, second) {
+      if (arguments.length < 2) return store.get(first);
+      return httpResponse('GET', first, { headers: second });
+    },
+    getString(rule, content) {
+      const value = content === undefined || content === null || content === '' ? currentResult() : content;
+      return evaluateRuleString(value, rule);
+    },
+    getStringList(rule, content) {
+      const value = content === undefined || content === null || content === '' ? currentResult() : content;
+      return evaluateRuleList(value, rule);
+    },
 
     ajax(url, options) {
       const result = performSafe('GET', url, normalizeAjaxOptions(options));
@@ -194,20 +208,13 @@ export function makeJavaBindings({ client, store, hooks, sourceApi }) {
       return java.ajaxAll(urls, options);
     },
     connect(url, headers) {
-      const result = performSafe('GET', url, { headers });
-      return makeResponse(result.res ?? { code: 0, headers: {}, body: result.error?.message ?? '', url: String(url) });
-    },
-    get(url, headers) {
-      const result = performSafe('GET', url, { headers });
-      return makeResponse(result.res ?? { code: 0, headers: {}, body: result.error?.message ?? '', url: String(url) });
+      return httpResponse('GET', url, { headers });
     },
     head(url, headers) {
-      const result = performSafe('HEAD', url, { headers });
-      return makeResponse(result.res ?? { code: 0, headers: {}, body: result.error?.message ?? '', url: String(url) });
+      return httpResponse('HEAD', url, { headers });
     },
     post(url, body, headers) {
-      const result = performSafe('POST', url, { headers, body });
-      return makeResponse(result.res ?? { code: 0, headers: {}, body: result.error?.message ?? '', url: String(url) });
+      return httpResponse('POST', url, { headers, body });
     },
 
     md5Encode,

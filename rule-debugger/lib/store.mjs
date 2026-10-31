@@ -161,10 +161,19 @@ export class Store {
     for (const k of Object.keys(before.vars)) {
       if (!(k in after.vars)) changes.push({ key: k, from: before.vars[k], to: undefined });
     }
+    const ruleChanges = [];
+    for (const [k, v] of Object.entries(after.ruleMap)) {
+      if (!(k in before.ruleMap)) ruleChanges.push({ key: k, from: undefined, to: v });
+      else if (before.ruleMap[k] !== v) ruleChanges.push({ key: k, from: before.ruleMap[k], to: v });
+    }
+    for (const k of Object.keys(before.ruleMap)) {
+      if (!(k in after.ruleMap)) ruleChanges.push({ key: k, from: before.ruleMap[k], to: undefined });
+    }
     return {
       rawChanged: before.raw !== after.raw,
       raw: after.raw,
       vars: changes,
+      ruleMap: ruleChanges,
       loginInfo: Object.fromEntries(this.loginInfo),
       cache: {
         added: after.disk.filter((k) => !before.disk.includes(k)),

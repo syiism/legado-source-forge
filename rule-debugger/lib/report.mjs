@@ -35,6 +35,7 @@ export function renderHuman(report, options = {}) {
   lines.push(`▶ ${name}`);
   if (report.source.project) lines.push(`  工程：${report.source.project}`);
   else if (report.source.file) lines.push(`  文件：${report.source.file}`);
+  for (const warning of report.build?.warnings ?? []) lines.push(`  build: ${warning}`);
   const bindBits = [];
   if (report.bindings.key !== '' && report.bindings.key !== null) bindBits.push(`key=${report.bindings.key}`);
   if (report.bindings.page !== null && report.bindings.page !== undefined) bindBits.push(`page=${report.bindings.page}`);
@@ -69,6 +70,9 @@ export function renderHuman(report, options = {}) {
       lines.push(`  var: ${change.key} = ${change.to === undefined ? '(删除)' : truncateText(JSON.stringify(redactValue(change.key, change.to, showSecrets)), maxChars, full)}`);
     }
     if (step.vars?.rawChanged) lines.push(`  var.raw: ${formatBytes(step.vars.raw.length)} 字符`);
+    for (const change of step.vars?.ruleMap ?? []) {
+      lines.push(`  rule: ${change.key} = ${change.to === undefined ? '(删除)' : truncateText(JSON.stringify(redactValue(change.key, change.to, showSecrets)), maxChars, full)}`);
+    }
 
     if (step.error) {
       lines.push(`  ✗ ${step.error.message}`);
@@ -86,12 +90,22 @@ export function renderHuman(report, options = {}) {
       lines.push(`  suffix ${step.suffix.text} → ${step.suffixApplied.type}, ${formatBytes(step.suffixApplied.size)}`);
       if (step.suffixApplied.text !== '') lines.push(indent(truncateText(step.suffixApplied.text, maxChars, full), '    '));
     } else if (step.suffix?.kind === 'options') {
-      lines.push(`  suffix: 请求选项 ${truncateText(JSON.stringify(step.suffix.json), maxChars, full)}（不应用）`);
+      lines.push(`  suffix: 请求选项 ${truncateText(JSON.stringify(step.suffix.json), maxChars, full)}（加 --follow 才会发请求）`);
     } else if (step.suffix?.kind === 'selector') {
       lines.push(`  suffix: CSS 选择器「${step.suffix.text}」需要选择器引擎，已跳过`);
     } else if (step.suffix?.kind === 'regex') {
       lines.push(`  suffix: 正则「${step.suffix.text}」需要选择器引擎，已跳过`);
     }
+  }
+
+  if (report.flow) {
+    const flow = report.flow;
+    const book = flow.book ?? {};
+    const chapter = flow.chapter ?? {};
+    const nth = (index) => (Number.isInteger(index) ? index + 1 : '?');
+    lines.push('');
+    lines.push(`▶ flow: 《${book.name || '?'}》第 ${nth(flow.search?.index)}/${flow.search?.total ?? '?'} 本 → 第 ${nth(flow.toc?.index)}/${flow.toc?.total ?? '?'} 章《${chapter.title || '?'}》`);
+    if (flow.content) lines.push(`  正文：${formatBytes(flow.content.bytes ?? flow.content.chars)}`);
   }
 
   lines.push('');
@@ -111,6 +125,9 @@ export function sanitizeReport(report, showSecrets) {
   clone.bindings.login = redactMap(clone.bindings.login, false);
   for (const step of clone.steps ?? []) {
     for (const change of step.vars?.vars ?? []) {
+      if (change.to !== undefined) change.to = redactValue(change.key, change.to, false);
+    }
+    for (const change of step.vars?.ruleMap ?? []) {
       if (change.to !== undefined) change.to = redactValue(change.key, change.to, false);
     }
     if (step.vars?.loginInfo) step.vars.loginInfo = redactMap(step.vars.loginInfo, false);

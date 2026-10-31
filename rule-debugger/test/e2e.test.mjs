@@ -27,6 +27,45 @@ function writeCassette(name, entries) {
   return file;
 }
 
+function cassetteEntry(url, body) {
+  return {
+    key: Cassette.key('GET', url, ''),
+    method: 'GET',
+    url,
+    status: 200,
+    headers: { 'content-type': 'application/json; charset=utf-8' },
+    finalUrl: url,
+    body,
+  };
+}
+
+function writeFlowSource(name) {
+  const file = path.join(dir, name);
+  fs.writeFileSync(file, JSON.stringify([{
+    bookSourceName: 'flow-fixture',
+    bookSourceUrl: 'https://flow.test',
+    searchUrl: '<js>\n"/search?q=" + key + "&page=" + page\n</js>',
+    ruleSearch: {
+      bookList: 'data.books',
+      name: 'title',
+      author: 'author',
+      bookUrl: '@js:\n"/book/" + {{$.id}};',
+    },
+    ruleBookInfo: {
+      name: 'book.title',
+      author: 'book.author',
+      tocUrl: '@js:\n"/toc/" + {{$.book.id}};',
+    },
+    ruleToc: {
+      chapterList: 'data.chapters',
+      chapterName: 'title',
+      chapterUrl: '@js:\n"/chapter/" + {{$.id}};',
+    },
+    ruleContent: { content: 'data.content' },
+  }]));
+  return file;
+}
+
 test('searchUrl 输出可读 JSON，退出码 0', () => {
   const { code, stdout, stderr } = runCli([
     '--source', FIXTURE, '--rule', 'searchUrl', '--key', '斗破苍穹', '--json',
@@ -199,14 +238,266 @@ test('--project 构建失败退出码 4', () => {
   assert.match(stderr, /gate failed/);
 });
 
+test('--project 门禁失败后自动用 --no-gate 重试', () => {
+  const project = fs.mkdtempSync(path.join(dir, 'nogate-'));
+  fs.writeFileSync(path.join(project, 'build.mjs'), [
+    "import fs from 'node:fs';",
+    "const out = process.argv[process.argv.indexOf('--out') + 1];",
+    "if (!process.argv.includes('--no-gate')) { console.error('✘ 语法门禁失败 demo'); process.exit(1); }",
+    "fs.writeFileSync(out, JSON.stringify([{ bookSourceName: 'nogate', bookSourceUrl: 'https://n.test', searchUrl: '@js:1' }]));",
+  ].join('\n'));
+  const { code, stdout } = runCli(['--project', project, '--rule', 'searchUrl', '--json']);
+  assert.equal(code, 0);
+  const report = json(stdout);
+  assert.match(report.build.warnings[0], /--no-gate/);
+  assert.equal(report.steps[0].result.text, '1');
+});
+
 test('--result 的 data:;base64 URI 按 Legado 语义解码后注入 result', () => {
   const b64 = Buffer.from('sqtoc:3380555', 'utf8').toString('base64');
+  const plain = runCli([
+    '--source', FIXTURE, '--js', 'String(result)', '--result', `data:;base64,${b64}`, '--json',
+  ]);
+  assert.equal(plain.code, 0);
+  assert.equal(json(plain.stdout).steps[0].result.text, 'sqtoc:3380555');
+
+  const typed = runCli([
+    '--source', FIXTURE, '--js', 'String(result)', '--result', `data:;base64,${b64}, {"type":"sq"}`, '--json',
+  ]);
+  assert.equal(typed.code, 0);
+  assert.equal(json(typed.stdout).steps[0].result.text, Buffer.from('sqtoc:3380555').toString('hex'));
+});
+
+test('java.get(key) 读变量，get(url, headers) 发请求', () => {
   const { code, stdout } = runCli([
-    '--source', FIXTURE, '--js', 'String(result)', '--result', `data:;base64,${b64},{"type":"sq"}`, '--json',
+    '--source', FIXTURE, '--offline', '--js', "java.put('x','y'); String(java.get('x'))", '--json',
   ]);
   assert.equal(code, 0);
   const report = json(stdout);
-  assert.equal(report.steps[0].result.text, 'sqtoc:3380555');
+  assert.equal(report.steps[0].result.text, 'y');
+  assert.equal(report.steps[0].net.length, 0);
+  assert.deepEqual(report.steps[0].vars.ruleMap, [{ key: 'x', to: 'y' }]);
+
+  const url = 'https://fixture.test/get';
+  const cassette = writeCassette('java-get.json', [{
+    key: Cassette.key('GET', url, ''),
+    method: 'GET',
+    url,
+    status: 200,
+    headers: { 'content-type': 'text/plain' },
+    finalUrl: url,
+    body: 'ok',
+  }]);
+  const http = runCli([
+    '--source', FIXTURE, '--js', `String(java.get('${url}', {}).body())`, '--cassette', cassette, '--json',
+  ]);
+  assert.equal(http.code, 0);
+  assert.equal(json(http.stdout).steps[0].result.text, 'ok');
+});
+
+test('java.getString / getStringList 按当前 result 求值', () => {
+  const one = runCli([
+    '--source', FIXTURE, '--js', "java.getString('$.a.b')", '--result', '{"a":{"b":"v"}}', '--offline', '--json',
+  ]);
+  assert.equal(one.code, 0);
+  assert.equal(json(one.stdout).steps[0].result.text, 'v');
+
+  const list = runCli([
+    '--source', FIXTURE, '--js', "JSON.stringify(java.getStringList('$.a[*].b'))",
+    '--result', '{"a":[{"b":1},{"b":2}]}', '--offline', '--json',
+  ]);
+  assert.equal(list.code, 0);
+  assert.deepEqual(JSON.parse(json(list.stdout).steps[0].result.text), ['1', '2']);
+});
+
+test('@js 内的 {{}} 与 @put 生效', () => {
+  const file = path.join(dir, 'semantics-source.json');
+  fs.writeFileSync(file, JSON.stringify([{
+    bookSourceName: 'semantics',
+    bookSourceUrl: 'https://sem.test',
+    ruleSearch: {
+      bookList: 'data.books',
+      name: 'title@put:{"bid":"$.id"}',
+      bookUrl: '@js:\nvar p = { id: {{$.id}} };\n"/detail?id=" + p.id;',
+    },
+  }]));
+  const bookUrl = runCli([
+    '--source', file, '--rule', 'search.bookUrl', '--result', '{"id":7}', '--offline', '--json',
+  ]);
+  assert.equal(bookUrl.code, 0);
+  assert.equal(json(bookUrl.stdout).steps[0].result.text, '/detail?id=7');
+
+  const name = runCli([
+    '--source', file, '--rule', 'search.name', '--result', '{"id":7,"title":"A"}', '--offline', '--json',
+  ]);
+  assert.equal(name.code, 0);
+  const report = json(name.stdout);
+  assert.equal(report.steps[0].result.text, 'A');
+  assert.deepEqual(report.steps[0].vars.ruleMap, [{ key: 'bid', to: '7' }]);
+
+  const list = runCli([
+    '--source', file, '--rule', 'search.bookList', '--result', '{"data":{"books":[{"id":1}]}}',
+    '--offline', '--json',
+  ]);
+  assert.equal(list.code, 0);
+  assert.deepEqual(JSON.parse(json(list.stdout).steps[0].result.text), [{ id: 1 }]);
+
+  const inlineJs = runCli([
+    '--source', file, '--js', 'var x = {{@js:1 + 1}}; String(x)', '--offline', '--json',
+  ]);
+  assert.equal(inlineJs.code, 0);
+  assert.equal(json(inlineJs.stdout).steps[0].result.text, '2');
+
+  const broken = runCli([
+    '--source', file, '--js', "var x = '{{nope()}}'; 'ok'", '--offline', '--json',
+  ]);
+  assert.equal(broken.code, 1);
+  assert.match(json(broken.stdout).steps[0].error.message, /nope is not defined/);
+});
+
+test('--follow 用 bookSourceUrl 解析相对 URL 并把响应作为结果', () => {
+  const url = 'https://fixture.test/search?q=abc&page=1';
+  const cassette = writeCassette('follow.json', [{
+    key: Cassette.key('GET', url, ''),
+    method: 'GET',
+    url,
+    status: 200,
+    headers: { 'content-type': 'application/json; charset=utf-8' },
+    finalUrl: url,
+    body: '{"data":[{"name":"x"}]}',
+  }]);
+  const file = path.join(dir, 'follow-source.json');
+  fs.writeFileSync(file, JSON.stringify([{
+    bookSourceName: 'follow',
+    bookSourceUrl: 'https://fixture.test',
+    searchUrl: '<js>\n"/search?q=" + key + "&page=" + page\n</js>',
+    ruleSearch: { bookList: 'data' },
+  }]));
+  const { code, stdout } = runCli([
+    '--source', file, '--key', 'abc', '--rule', 'searchUrl', '--follow', '--rule', 'bookList',
+    '--cassette', cassette, '--json',
+  ]);
+  assert.equal(code, 0);
+  const report = json(stdout);
+  assert.equal(report.steps[0].followed.url, url);
+  assert.equal(report.steps[0].result.text, '{"data":[{"name":"x"}]}');
+  assert.deepEqual(JSON.parse(report.steps[1].result.text), [{ name: 'x' }]);
+});
+
+const FLOW_CASSETTE = [
+  cassetteEntry('https://flow.test/search?q=abc&page=1', JSON.stringify({
+    data: { books: [{ id: 1, title: '书一', author: '作者一' }, { id: 2, title: '书二', author: '作者二' }] },
+  })),
+  cassetteEntry('https://flow.test/book/1', JSON.stringify({ book: { id: 1, title: '书一详情', author: '作者一详情' } })),
+  cassetteEntry('https://flow.test/book/2', JSON.stringify({ book: { id: 2, title: '书二详情', author: '作者二详情' } })),
+  cassetteEntry('https://flow.test/toc/1', JSON.stringify({
+    data: { chapters: [{ id: 10, title: '第1章' }, { id: 11, title: '第2章' }] },
+  })),
+  cassetteEntry('https://flow.test/toc/2', JSON.stringify({
+    data: { chapters: [{ id: 20, title: '第1章' }, { id: 21, title: '第2章' }] },
+  })),
+  cassetteEntry('https://flow.test/chapter/10', JSON.stringify({ data: { content: '正文一' } })),
+  cassetteEntry('https://flow.test/chapter/11', JSON.stringify({ data: { content: '正文一第二' } })),
+  cassetteEntry('https://flow.test/chapter/20', JSON.stringify({ data: { content: '正文二' } })),
+  cassetteEntry('https://flow.test/chapter/21', JSON.stringify({ data: { content: '正文二第二' } })),
+];
+
+test('--flow 默认选中搜索结果第一条与目录第一章', () => {
+  const file = writeFlowSource('flow-source.json');
+  const cassette = writeCassette('flow.cassette.json', FLOW_CASSETTE);
+  const { code, stdout } = runCli([
+    '--source', file, '--key', 'abc', '--flow', '--cassette', cassette, '--json',
+  ]);
+  assert.equal(code, 0);
+  const report = json(stdout);
+  assert.equal(report.ok, true);
+  assert.equal(report.flow.search.total, 2);
+  assert.equal(report.flow.search.index, 0);
+  assert.equal(report.flow.book.name, '书一详情');
+  assert.equal(report.flow.toc.total, 2);
+  assert.equal(report.flow.toc.index, 0);
+  assert.equal(report.flow.chapter.title, '第1章');
+  assert.equal(report.flow.content.chars, '正文一'.length);
+  assert.equal(report.steps.at(-1).result.text, '正文一');
+  for (const label of ['flow.search', 'flow.detail', 'flow.toc', 'flow.content']) {
+    assert.ok(report.steps.some((s) => s.label === label), `缺少步骤 ${label}`);
+  }
+});
+
+test('--flow 支持选择第 N 本书与第 N 章', () => {
+  const file = writeFlowSource('flow-source-index.json');
+  const cassette = writeCassette('flow-index.cassette.json', FLOW_CASSETTE);
+  const { code, stdout } = runCli([
+    '--source', file, '--key', 'abc',
+    '--flow', '--book-index', '1', '--chapter-index', '1', '--cassette', cassette, '--json',
+  ]);
+  assert.equal(code, 0);
+  const report = json(stdout);
+  assert.equal(report.flow.book.name, '书二详情');
+  assert.equal(report.flow.toc.index, 1);
+  assert.equal(report.flow.chapter.title, '第2章');
+  assert.equal(report.steps.at(-1).result.text, '正文二第二');
+});
+
+test('--flow 搜索为空时在 bookList 阶段报错', () => {
+  const file = writeFlowSource('flow-source-empty.json');
+  const cassette = writeCassette('flow-empty.cassette.json', [
+    cassetteEntry('https://flow.test/search?q=abc&page=1', '{"data":{"books":[]}}'),
+  ]);
+  const { code, stdout } = runCli([
+    '--source', file, '--key', 'abc', '--flow', '--cassette', cassette, '--json',
+  ]);
+  assert.equal(code, 1);
+  const report = json(stdout);
+  assert.equal(report.ok, false);
+  assert.equal(report.flow.search.total, 0);
+  assert.match(report.steps.at(-1).error.message, /搜索结果为空/);
+});
+
+test('--flow 的章节 data URI + type 在 fetch 阶段本地转 hex', () => {
+  const file = path.join(dir, 'flow-source-datauri.json');
+  fs.writeFileSync(file, JSON.stringify([{
+    bookSourceName: 'flow-datauri',
+    bookSourceUrl: 'https://flow.test',
+    searchUrl: '<js>\n"/search?q=" + key + "&page=" + page\n</js>',
+    ruleSearch: { bookList: 'data.books', bookUrl: '@js:\n"/book/" + {{$.id}};' },
+    ruleBookInfo: { tocUrl: '@js:\n"/toc/" + {{$.book.id}};' },
+    ruleToc: {
+      chapterList: 'data.chapters',
+      chapterUrl: '@js:\n"data:;base64," + java.base64Encode(String({{$.id}}) + "/abc/0") + ",{\\"type\\":\\"qm\\"}";',
+    },
+    ruleContent: { content: '@js:\njava.hexDecodeToString(result);' },
+  }]));
+  const cassette = writeCassette('flow-datauri.cassette.json', [
+    cassetteEntry('https://flow.test/search?q=abc&page=1', JSON.stringify({ data: { books: [{ id: 1, title: '书一' }] } })),
+    cassetteEntry('https://flow.test/book/1', JSON.stringify({ book: { id: 1, title: '书一' } })),
+    cassetteEntry('https://flow.test/toc/1', JSON.stringify({ data: { chapters: [{ id: 10 }] } })),
+  ]);
+  const { code, stdout } = runCli([
+    '--source', file, '--key', 'abc', '--flow', '--cassette', cassette, '--json',
+  ]);
+  assert.equal(code, 0);
+  const report = json(stdout);
+  assert.equal(report.steps.at(-1).label, 'ruleContent.content');
+  assert.equal(report.steps.at(-1).result.text, '10/abc/0');
+  assert.equal(report.steps.find((s) => s.label === 'flow.content').net[0].mode, 'data');
+});
+
+test('--flow 可用 --result 喂搜索响应，跳过 searchUrl 请求', () => {
+  const file = writeFlowSource('flow-source-seed.json');
+  const seed = path.join(dir, 'flow-search.json');
+  fs.writeFileSync(seed, JSON.stringify({
+    data: { books: [{ id: 1, title: '书一', author: '作者一' }] },
+  }));
+  const cassette = writeCassette('flow-seed.cassette.json', FLOW_CASSETTE.filter((entry) => !entry.url.includes('/search')));
+  const { code, stdout } = runCli([
+    '--source', file, '--flow', '--result', `@${seed}`, '--cassette', cassette, '--json',
+  ]);
+  assert.equal(code, 0);
+  const report = json(stdout);
+  assert.equal(report.steps[0].label, 'ruleSearch.bookList');
+  assert.equal(report.flow.book.name, '书一详情');
+  assert.equal(report.steps.at(-1).result.text, '正文一');
 });
 
 test('--help 退出码 0 且列出退出码约定', () => {

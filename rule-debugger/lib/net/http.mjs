@@ -31,6 +31,26 @@ function lowerKeys(headers) {
   return out;
 }
 
+const MAX_REDIRECTS = 5;
+const REDIRECT_STATUS = new Set([301, 302, 303, 307, 308]);
+
+// Legado 的 data URI 不走网络；带 type 选项时返回原始字节的 hex。
+function dataUriResponse(url, { type, preferCharset } = {}) {
+  const match = /^data:[^,]*;base64,([\s\S]*)$/i.exec(String(url).trim());
+  if (!match) return null;
+  const bytes = Buffer.from(match[1].replace(/\s+/g, ''), 'base64');
+  const charset = type != null ? null : (preferCharset ?? 'utf-8');
+  return {
+    code: 200,
+    headers: {},
+    body: type != null ? bytes.toString('hex') : decodeBody(bytes, charset),
+    bytes: bytes.length,
+    url,
+    charset,
+    mode: 'data',
+  };
+}
+
 export class HttpClient {
   constructor({
     jar,
@@ -51,15 +71,15 @@ export class HttpClient {
     this.charset = charset;
     this.onCall = onCall;
     this.tmpDir = null;
-    this.headerFile = null;
+    this.headerSeq = 0;
   }
 
   headerFileOnce() {
     if (!this.tmpDir) {
       this.tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), 'legado-debug-'));
-      this.headerFile = path.join(this.tmpDir, 'headers.txt');
     }
-    return this.headerFile;
+    this.headerSeq += 1;
+    return path.join(this.tmpDir, `headers-${this.headerSeq}.txt`);
   }
 
   mergedHeaders(headers, url) {
@@ -73,21 +93,27 @@ export class HttpClient {
     return merged;
   }
 
-  request(method, url, { headers, body = '', charset } = {}) {
+  request(method, url, { headers, body = '', charset, type } = {}) {
     const m = String(method || 'GET').toUpperCase();
-    const merged = this.mergedHeaders(headers, url);
     const started = Date.now();
     const prefer = charset ?? this.charset;
 
+    const local = dataUriResponse(url, { type, preferCharset: prefer });
+    if (local) {
+      this.onCall?.({ method: m, url, status: local.code, bytes: local.bytes, ms: Date.now() - started, mode: local.mode, charset: local.charset });
+      return local;
+    }
+
     const hit = this.cassette?.get(m, url, body);
     if (hit) {
-      const cs = detectCharset({ headers: hit.headers, bytes: Buffer.from(hit.body ?? ''), prefer });
+      const rawBytes = Buffer.from(hit.body ?? '', 'utf8');
+      const cs = type != null ? null : detectCharset({ headers: hit.headers, bytes: rawBytes, prefer });
       this.jar?.fromSetCookie(url, hit.setCookie);
       const out = {
         code: hit.status,
         headers: hit.headers ?? {},
-        body: hit.body ?? '',
-        bytes: Buffer.byteLength(hit.body ?? ''),
+        body: type != null ? rawBytes.toString('hex') : hit.body ?? '',
+        bytes: rawBytes.length,
         url: hit.finalUrl || url,
         charset: cs,
         mode: 'replay',
@@ -106,7 +132,7 @@ export class HttpClient {
 
     let result;
     try {
-      result = this.live(m, url, merged, body, prefer);
+      result = this.live(m, url, headers ?? {}, body, prefer, type);
     } catch (err) {
       this.onCall?.({ method: m, url, status: 0, bytes: 0, ms: Date.now() - started, mode: 'error', charset: null, error: err.code ?? 'ERROR' });
       throw err;
@@ -120,27 +146,75 @@ export class HttpClient {
         headers: result.headers,
         finalUrl: result.url,
         setCookie: result.setCookie,
-        body: result.body,
+        body: result._rawBody ?? result.body,
       });
     }
     this.onCall?.({ method: m, url, status: result.code, bytes: result.bytes, ms: Date.now() - started, mode: 'live', charset: result.charset });
     return result;
   }
 
-  live(method, url, headers, body, preferCharset) {
+  live(method, url, headers, body, preferCharset, type) {
+    let currentUrl = url;
+    let currentMethod = String(method || 'GET').toUpperCase();
+    let currentBody = body;
+    let redirects = 0;
+    while (true) {
+      // 每一跳都重新合并 jar：重定向响应里的 Set-Cookie 必须作用于下一跳。
+      const merged = this.mergedHeaders(headers, currentUrl);
+      const hop = this.curlOnce(currentMethod, currentUrl, merged, currentBody, preferCharset);
+      this.jar?.fromSetCookie(currentUrl, hop.setCookie);
+      const location = hop.headers.location;
+      if (location && REDIRECT_STATUS.has(hop.status)) {
+        if (redirects >= MAX_REDIRECTS) {
+          throw new NetworkError('TOO_MANY_REDIRECTS', `重定向超过 ${MAX_REDIRECTS} 次：${url}`, url);
+        }
+        let nextUrl = '';
+        try {
+          nextUrl = new URL(location, currentUrl).toString();
+        } catch {
+          nextUrl = '';
+        }
+        if (nextUrl) {
+          redirects += 1;
+          if (currentMethod !== 'HEAD' && [301, 302, 303].includes(hop.status)) {
+            currentMethod = 'GET';
+            currentBody = '';
+          }
+          currentUrl = nextUrl;
+          continue;
+        }
+      }
+      return {
+        code: hop.status,
+        headers: hop.headers,
+        body: type != null ? hop.bodyBuf.toString('hex') : hop.text,
+        _rawBody: hop.text,
+        bytes: hop.bodyBuf.length,
+        url: currentUrl,
+        charset: type != null ? null : hop.charset,
+        setCookie: hop.setCookie,
+        mode: 'live',
+      };
+    }
+  }
+
+  curlOnce(method, url, headers, body, preferCharset) {
     const headerFile = this.headerFileOnce();
     const marker = `__LD_META_${Math.random().toString(36).slice(2)}__`;
     // OkHttp 会把非 ASCII 查询参数按 UTF-8 百分号编码；curl 原样发送会被站点 400
     const curlUrl = encodeURI(url);
     const args = [
-      '-sS', '-L', '--max-redirs', '5', '--compressed',
+      '-sS', '--compressed',
       '--max-time', String(Math.max(1, Math.ceil(this.timeout / 1000))),
       '-X', method,
       '-D', headerFile,
       '-w', `\n${marker}%{http_code}\n%{url_effective}`,
       '--url', curlUrl,
     ];
-    for (const [k, v] of Object.entries(headers)) args.push('-H', `${k}: ${v}`);
+    for (const [k, v] of Object.entries(headers)) {
+      if (v === undefined || v === null) continue;
+      args.push('-H', `${k}: ${v}`);
+    }
     if (body !== '' && method !== 'HEAD') args.push('--data-binary', '@-');
 
     const run = spawnSync('curl', args, {
@@ -165,24 +239,19 @@ export class HttpClient {
     const idx = stdout.lastIndexOf(markerBuf);
     const bodyBuf = idx >= 0 ? stdout.subarray(0, idx) : stdout;
     const meta = idx >= 0 ? stdout.subarray(idx + markerBuf.length).toString('utf8') : '';
-    const [codeText, finalUrl] = meta.split('\n');
+    const [codeText] = meta.split('\n');
     const status = Number(codeText) || 0;
 
     const headerText = fs.existsSync(headerFile) ? fs.readFileSync(headerFile, 'latin1') : '';
     const { headers: respHeaders, setCookie } = parseHeaderDump(headerText);
     const charset = detectCharset({ headers: respHeaders, bytes: bodyBuf, prefer: preferCharset });
-    const text = decodeBody(bodyBuf, charset);
-    this.jar?.fromSetCookie(url, setCookie);
-
     return {
-      code: status,
+      status,
       headers: respHeaders,
-      body: text,
-      bytes: bodyBuf.length,
-      url: finalUrl || url,
-      charset,
       setCookie,
-      mode: 'live',
+      bodyBuf,
+      text: decodeBody(bodyBuf, charset),
+      charset,
     };
   }
 }

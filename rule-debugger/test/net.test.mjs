@@ -3,6 +3,7 @@ import assert from 'node:assert/strict';
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
+import { spawn, spawnSync } from 'node:child_process';
 import { HttpClient, NetworkError, parseHeaderDump } from '../lib/net/http.mjs';
 import { Cassette, CassetteMiss } from '../lib/net/cassette.mjs';
 import { CookieJar } from '../lib/net/cookies.mjs';
@@ -157,4 +158,64 @@ test('GBK 解码与字符集探测优先级', () => {
     'gbk',
   );
   assert.equal(detectCharset({ bytes: Buffer.from('plain') }), 'utf-8');
+});
+
+test('data URI 本地返回；type 选项返回 hex', () => {
+  const b64 = Buffer.from('sqtoc:1', 'utf8').toString('base64');
+  const client = new HttpClient();
+  const plain = client.request('GET', `data:;base64,${b64}`);
+  assert.equal(plain.mode, 'data');
+  assert.equal(plain.code, 200);
+  assert.equal(plain.body, 'sqtoc:1');
+
+  const typed = client.request('GET', `data:;base64,${b64}`, { type: 'sq' });
+  assert.equal(typed.body, Buffer.from('sqtoc:1').toString('hex'));
+});
+
+test('type 选项对回放响应返回 hex', () => {
+  const url = 'https://hex.test/x';
+  const file = writeCassette('hex.json', [entry('GET', url, 'abc')]);
+  const client = new HttpClient({ cassette: new Cassette(file).load(), offline: true });
+  const res = client.request('GET', url, { type: 'qm' });
+  assert.equal(res.body, Buffer.from('abc').toString('hex'));
+});
+
+const hasCurl = spawnSync('curl', ['--version'], { encoding: 'utf8' }).status === 0;
+
+test('真实请求：重定向链内的 Set-Cookie 作用于下一跳', { skip: !hasCurl, timeout: 15000 }, async () => {
+  const script = path.join(dir, 'redirect-server.mjs');
+  fs.writeFileSync(script, [
+    "import http from 'node:http';",
+    "const server = http.createServer((req, res) => {",
+    "  if (req.url === '/redirect') {",
+    "    res.writeHead(302, { Location: '/echo', 'Set-Cookie': 'sid=xyz; Path=/' });",
+    '    res.end();',
+    '    return;',
+    '  }',
+    "  res.writeHead(200, { 'content-type': 'application/json' });",
+    '  res.end(JSON.stringify({ method: req.method, url: req.url, headers: req.headers }));',
+    '});',
+    "server.listen(0, '127.0.0.1', () => console.log('ready ' + server.address().port));",
+  ].join('\n'));
+  const child = spawn(process.execPath, [script], { stdio: ['ignore', 'pipe', 'inherit'] });
+  try {
+    const port = await new Promise((resolve, reject) => {
+      let buffer = '';
+      child.stdout.on('data', (chunk) => {
+        buffer += chunk;
+        const match = /ready (\d+)/.exec(buffer);
+        if (match) resolve(Number(match[1]));
+      });
+      child.once('error', reject);
+      child.once('exit', (code) => reject(new Error(`server exited ${code}`)));
+    });
+    const client = new HttpClient({ jar: new CookieJar() });
+    const res = client.request('GET', `http://127.0.0.1:${port}/redirect`);
+    const echoed = JSON.parse(res.body);
+    assert.equal(echoed.url, '/echo');
+    assert.equal(echoed.headers.cookie, 'sid=xyz');
+    assert.equal(res.url, `http://127.0.0.1:${port}/echo`);
+  } finally {
+    child.kill();
+  }
 });

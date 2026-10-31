@@ -2,11 +2,15 @@ import { UsageError } from './rule.mjs';
 
 const VALUE_FLAGS = new Set([
   '--source', '--project', '--rule', '--js', '--js-file', '--result', '--base-url',
-  '--book', '--chapter', '--key', '--page', '--var', '--login', '--timeout', '--ua',
+  '--book', '--chapter', '--key', '--page', '--book-index', '--chapter-index',
+  '--var', '--login', '--timeout', '--ua',
   '--charset', '--cassette', '--record', '--cookie', '--cookie-jar', '--state', '--max-chars',
 ]);
 
-const BOOLEAN_FLAGS = new Set(['--offline', '--no-save', '--json', '--full', '--quiet', '--show-secrets', '--help', '-h']);
+const BOOLEAN_FLAGS = new Set([
+  '--offline', '--follow', '--flow', '--no-gate', '--no-save', '--json', '--full', '--quiet',
+  '--show-secrets', '--help', '-h',
+]);
 
 function newStep(kind, value) {
   return {
@@ -18,6 +22,9 @@ function newStep(kind, value) {
     chapter: null,
     key: null,
     page: null,
+    bookIndex: null,
+    chapterIndex: null,
+    follow: null,
     vars: {},
     logins: {},
   };
@@ -34,8 +41,12 @@ export function parseArgs(argv) {
     source: null,
     project: null,
     steps: [],
-    defaults: { result: null, baseUrl: null, book: null, chapter: null, key: null, page: null, vars: {}, logins: {} },
+    defaults: {
+      result: null, baseUrl: null, book: null, chapter: null, key: null, page: null,
+      bookIndex: 0, chapterIndex: 0, follow: false, vars: {}, logins: {},
+    },
     net: { timeout: 15000, ua: null, charset: null, offline: false, cassette: null, record: null, cookie: null, cookieJar: null },
+    build: { noGate: false },
     state: { file: null, save: true },
     output: { json: false, full: false, maxChars: 2000, quiet: false, showSecrets: false },
     help: false,
@@ -59,19 +70,33 @@ export function parseArgs(argv) {
     switch (arg) {
       case '--source': config.source = value(); break;
       case '--project': config.project = value(); break;
+      case '--no-gate': config.build.noGate = true; break;
       case '--help': case '-h': config.help = true; break;
       case '--rule': current = newStep('rule', value()); config.steps.push(current); break;
       case '--js': current = newStep('js', value()); config.steps.push(current); break;
       case '--js-file': current = newStep('js-file', value()); config.steps.push(current); break;
+      case '--flow': current = newStep('flow', null); config.steps.push(current); break;
       case '--result': target('result', value()); break;
       case '--base-url': target('baseUrl', value()); break;
       case '--book': target('book', value()); break;
       case '--chapter': target('chapter', value()); break;
       case '--key': target('key', value()); break;
+      case '--follow': {
+        if (current) current.follow = true;
+        else config.defaults.follow = true;
+        break;
+      }
       case '--page': {
         const n = Number(value());
         if (!Number.isFinite(n)) throw new UsageError('--page 需要数字');
         target('page', n);
+        break;
+      }
+      case '--book-index':
+      case '--chapter-index': {
+        const n = Number(value());
+        if (!Number.isInteger(n) || n < 0) throw new UsageError(`${arg} 需要非负整数`);
+        target(arg === '--book-index' ? 'bookIndex' : 'chapterIndex', n);
         break;
       }
       case '--var': {
@@ -117,7 +142,7 @@ export function parseArgs(argv) {
 
   if (config.help) return config;
   if (!config.source && !config.project) throw new UsageError('缺少 --source <书源.json> 或 --project <工程目录>');
-  if (config.steps.length === 0) throw new UsageError('至少需要一个 --rule / --js / --js-file');
+  if (config.steps.length === 0) throw new UsageError('至少需要一个 --rule / --js / --js-file / --flow');
   return config;
 }
 
@@ -127,17 +152,23 @@ export function usage() {
     '',
     '用法：',
     '  node rule-debugger/bin/legado-debug.mjs (--source <dist.json> | --project <dir>) \\',
-    '       (--rule <字段> ... | --js <代码> | --js-file <文件>) [选项]',
+    '       (--rule <字段> ... | --js <代码> | --js-file <文件> | --flow) [选项]',
     '',
     '字段：',
     '  searchUrl / exploreUrl / jsLib ...        顶层字段',
     '  search.bookList / bookinfo.init ...       规则字段（也可写 ruleSearch.bookList）',
     '  bookList                                  简写，默认 ruleSearch.bookList',
     '',
+    '自动流程：',
+    '  --flow                    搜索 → 详情 → 目录 → 正文（默认第 1 本、第 1 章）',
+    '  --book-index <n>          搜索结果下标（0 起，默认 0）',
+    '  --chapter-index <n>       目录章节下标（0 起，默认 0）',
+    '',
     '输入（写在 --rule 之后即该步专属，否则为全局默认）：',
     '  --result <text|@file>   当前步 result 绑定（默认取上一步输出）',
     '  --base-url <url>  --book <json|@file>  --chapter <json|@file>',
     '  --key <文本>  --page <n>  --var k=v  --login k=v',
+    '  --follow                 规则返回 URL 时按 bookSourceUrl/baseUrl 解析并请求，请求体作为结果',
     '',
     '网络：',
     '  --offline                禁止真实请求（配合 --cassette 回放）',
@@ -146,13 +177,14 @@ export function usage() {
     '  --timeout <ms>  --ua <UA>  --charset <编码>',
     '  --cookie "k=v; ..."  --cookie-jar <file>',
     '',
-    '状态与输出：',
+    '工程与状态：',
+    '  --no-gate                构建时跳过 JS 语法门禁（模板占位符工程）',
     '  --state <file>  --no-save   变量/缓存持久化',
     '  --json  --full  --max-chars <n>  --quiet  --show-secrets',
     '',
     '示例：',
     '  node rule-debugger/bin/legado-debug.mjs --project ../legado-work/work/光遇聚合 \\',
-    '       --rule searchUrl --key 斗破苍穹',
+    '       --key 斗破苍穹 --flow --book-index 0 --chapter-index 0',
     '  node rule-debugger/bin/legado-debug.mjs --source ../legado-work/work/stv/dist/STV.json \\',
     '       --rule ruleExplore.bookList --result @input.html --offline',
     '',

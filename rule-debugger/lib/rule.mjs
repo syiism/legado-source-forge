@@ -56,8 +56,6 @@ export function resolveRule(source, name) {
   throw new UsageError(`未知字段：${label}（顶层或 <组>.<字段>，如 search.bookList）`);
 }
 
-const REQUEST_OPTIONS = /,\s*(\{[\s\S]*\})\s*$/;
-
 // Legado 用 GSON（lenient）解析请求选项，规则里常见 {method:"POST"} 这种未加引号的键；
 // JSON.parse 严格模式下会整段放弃，按「未加引号的键补引号」再试一次即可对齐。
 export function parseOptionsJson(text) {
@@ -74,14 +72,38 @@ export function parseOptionsJson(text) {
   }
 }
 
+// URL/规则尾部 `, {...}` 请求选项：允许逗号后有空白，JSON 用 GSON 宽松规则解析。
+export function splitTrailingJson(text) {
+  const raw = String(text ?? '');
+  const match = /,\s*(\{[\s\S]*\})\s*$/.exec(raw);
+  if (!match) return null;
+  const json = parseOptionsJson(match[1]);
+  if (!json || typeof json !== 'object' || Array.isArray(json)) return null;
+  return { prefix: raw.slice(0, match.index), json, raw: match[0] };
+}
+
 function splitRequestOptions(body) {
-  const match = REQUEST_OPTIONS.exec(body);
-  if (!match) return { body, suffix: '' };
-  const parsed = parseOptionsJson(match[1]);
-  if (!parsed || typeof parsed !== 'object' || Array.isArray(parsed)) {
-    return { body, suffix: '' };
-  }
-  return { body: body.slice(0, match.index), suffix: body.slice(match.index) };
+  const split = splitTrailingJson(body);
+  if (!split) return { body, suffix: '' };
+  return { body: split.prefix, suffix: split.raw };
+}
+
+// Legado 在求值前剥离 @put:{...}，把规则按当前 result 求值后写入变量表。
+const PUT_RULE = /@put:\{[^}]*\}/gi;
+
+export function splitPutRule(value) {
+  const rule = String(value ?? '');
+  const putMap = {};
+  let found = false;
+  const stripped = rule.replace(PUT_RULE, (match) => {
+    const parsed = parseOptionsJson(match.slice('@put:'.length));
+    if (parsed && typeof parsed === 'object' && !Array.isArray(parsed)) {
+      Object.assign(putMap, parsed);
+      found = true;
+    }
+    return '';
+  });
+  return found ? { rule: stripped, putMap } : { rule, putMap: {} };
 }
 
 export function extractAtom(value) {
@@ -89,23 +111,26 @@ export function extractAtom(value) {
   if (typeof value !== 'string') return { mode: 'nonstring', raw: value };
   if (value.trim() === '') return { mode: 'empty' };
 
-  if (value.startsWith('@js:')) {
-    const { body, suffix } = splitRequestOptions(value.slice(4));
-    return { mode: 'js', lead: '@js:', body, suffix, wrapped: false };
+  const { rule, putMap } = splitPutRule(value);
+  if (rule.trim() === '') return { mode: 'empty', putMap };
+
+  if (rule.startsWith('@js:')) {
+    const { body, suffix } = splitRequestOptions(rule.slice(4));
+    return { mode: 'js', lead: '@js:', body, suffix, wrapped: false, putMap };
   }
 
-  if (value.startsWith('<js>')) {
-    const end = value.lastIndexOf('</js>');
-    if (end < 0) return { mode: 'broken', raw: value };
-    const body = value.slice(4, end);
-    let suffix = value.slice(end + 5);
+  if (rule.startsWith('<js>')) {
+    const end = rule.lastIndexOf('</js>');
+    if (end < 0) return { mode: 'broken', raw: rule, putMap };
+    const body = rule.slice(4, end);
+    let suffix = rule.slice(end + 5);
     if (suffix.startsWith('\r\n')) suffix = suffix.slice(2);
     else if (suffix.startsWith('\n')) suffix = suffix.slice(1);
-    return { mode: 'js', lead: '<js>', body, suffix, wrapped: true };
+    return { mode: 'js', lead: '<js>', body, suffix, wrapped: true, putMap };
   }
 
-  if (/\{\{[\s\S]*?\}\}/.test(value)) return { mode: 'template', raw: value };
-  return { mode: 'plain', raw: value };
+  if (/\{\{[\s\S]*?\}\}/.test(rule)) return { mode: 'template', raw: rule, putMap };
+  return { mode: 'plain', raw: rule, putMap };
 }
 
 export function classifySuffix(suffix) {
@@ -192,6 +217,100 @@ export function applySuffix(value, suffix) {
   }
 }
 
+function splitRegexRule(rule) {
+  const text = String(rule ?? '');
+  if (!text.includes('##')) return { base: text.trim(), hasRegex: false };
+  const parts = text.split('##');
+  return {
+    base: parts[0].trim(),
+    hasRegex: true,
+    pattern: parts[1] ?? '',
+    replacement: parts[2] ?? '',
+    first: parts.length > 3,
+  };
+}
+
+// JSON result 下的裸字段（data.books / title / book.author）等价于 $. 开头的 JSONPath
+export function looksLikeJsonPath(rule) {
+  const text = String(rule ?? '').trim();
+  if (!text) return false;
+  if (text.startsWith('$')) return true;
+  if (/^(?:https?:|data:|\/)/i.test(text)) return false;
+  return /^[A-Za-z_$][\w$-]*(?:(?:\.[A-Za-z_$][\w$-]*)|(?:\[(?:\d+|\*|"[^"]*"|'[^']*')\]))*$/.test(text);
+}
+
+export function isJsonText(value) {
+  if (value === null || value === undefined) return false;
+  if (typeof value === 'object') return true;
+  if (typeof value !== 'string') return false;
+  const text = value.trim();
+  if (!text || (text[0] !== '{' && text[0] !== '[')) return false;
+  try {
+    JSON.parse(text);
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+function asJson(value) {
+  if (typeof value !== 'string') return value;
+  try {
+    return JSON.parse(value);
+  } catch {
+    return value;
+  }
+}
+
+function applyRegexReplace(text, { pattern, replacement, first }) {
+  if (!pattern) return text;
+  try {
+    if (first) {
+      const regex = new RegExp(pattern);
+      const match = regex.exec(text);
+      return match ? match[0].replace(regex, replacement) : '';
+    }
+    return text.replace(new RegExp(pattern, 'g'), replacement);
+  } catch {
+    return text;
+  }
+}
+
+export function stringifyRuleValue(value) {
+  if (value === undefined || value === null) return '';
+  if (Array.isArray(value)) return value.map((item) => stringifyRuleValue(item)).join('\n');
+  if (typeof value === 'object') return JSON.stringify(value);
+  return String(value);
+}
+
+// 求值单条规则：JSONPath（含裸字段）+ 尾部 ##regex##replacement 替换。
+// JS/选择器仍由调用方处理；这里只覆盖 JSON 结果和规则内嵌取值。
+export function evaluateRule(value, rule) {
+  const { base, hasRegex, pattern, replacement, first } = splitRegexRule(rule);
+  let out;
+  if (!base) {
+    out = value;
+  } else if (base.startsWith('$') || (isJsonText(value) && looksLikeJsonPath(base))) {
+    const expr = base.startsWith('$') ? base : `$.${base}`;
+    out = applyJsonPath(asJson(value), expr);
+  } else {
+    out = base;
+  }
+  if (hasRegex) out = applyRegexReplace(stringifyRuleValue(out), { pattern, replacement, first });
+  return out;
+}
+
+export function evaluateRuleString(value, rule) {
+  return stringifyRuleValue(evaluateRule(value, rule));
+}
+
+export function evaluateRuleList(value, rule) {
+  const out = evaluateRule(value, rule);
+  if (out === undefined || out === null) return [];
+  if (Array.isArray(out)) return out.map((item) => stringifyRuleValue(item));
+  return [stringifyRuleValue(out)];
+}
+
 export function hasTemplate(text) {
   return typeof text === 'string' && /\{\{[\s\S]*?\}\}/.test(text);
 }
@@ -202,22 +321,17 @@ const URL_LIKE = /^(https?:\/\/|data:|\/)/i;
 export function splitResultOptions(value) {
   if (typeof value !== 'string') return null;
   const text = value.trim();
-  const idx = text.lastIndexOf(',{');
-  if (idx <= 0) return null;
-  const url = text.slice(0, idx).trim();
+  const split = splitTrailingJson(text);
+  if (!split) return null;
+  const url = split.prefix.trim();
   if (!URL_LIKE.test(url)) return null;
-  const json = parseOptionsJson(text.slice(idx + 1));
-  if (!json || typeof json !== 'object' || Array.isArray(json)) return null;
-  return { url, json };
+  return { url, json: split.json };
 }
 
+// Legado 的 makeUpRule 对 {{}} 求值失败会直接抛错；这里同样不吞异常。
 export function renderTemplate(text, evaluate) {
   return String(text).replace(/\{\{([\s\S]*?)\}\}/g, (_, expr) => {
-    try {
-      const value = evaluate(expr.trim());
-      return value === null || value === undefined ? '' : String(value);
-    } catch {
-      return '';
-    }
+    const value = evaluate(expr.trim());
+    return value === null || value === undefined ? '' : String(value);
   });
 }
