@@ -1,3 +1,5 @@
+import { looksLikeHtml, evaluateSelector } from './analyze/html.mjs';
+
 export class UsageError extends Error {
   constructor(message) {
     super(message);
@@ -293,6 +295,8 @@ export function evaluateRule(value, rule) {
   } else if (base.startsWith('$') || (isJsonText(value) && looksLikeJsonPath(base))) {
     const expr = base.startsWith('$') ? base : `$.${base}`;
     out = applyJsonPath(asJson(value), expr);
+  } else if (looksLikeHtml(value)) {
+    out = evaluateSelector(value, base);
   } else {
     out = base;
   }
@@ -305,10 +309,26 @@ export function evaluateRuleString(value, rule) {
 }
 
 export function evaluateRuleList(value, rule) {
+  if (looksLikeHtml(value)) {
+    const { base } = splitRegexRule(rule);
+    if (base) {
+      const all = evaluateSelector(value, base, true);
+      const outArr = hasRegex2(rule) ? all.map((t) => applyRegexReplace(t, regexOf(rule))) : all;
+      return outArr.map((item) => stringifyRuleValue(item));
+    }
+  }
   const out = evaluateRule(value, rule);
   if (out === undefined || out === null) return [];
   if (Array.isArray(out)) return out.map((item) => stringifyRuleValue(item));
   return [stringifyRuleValue(out)];
+}
+
+function hasRegex2(rule) {
+  return String(rule ?? '').includes('##');
+}
+function regexOf(rule) {
+  const parts = String(rule).split('##');
+  return { pattern: parts[1] ?? '', replacement: parts[2] ?? '', first: parts.length > 3 };
 }
 
 export function hasTemplate(text) {
