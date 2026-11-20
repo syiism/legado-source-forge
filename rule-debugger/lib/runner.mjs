@@ -12,6 +12,7 @@ import { CookieJar } from './net/cookies.mjs';
 import { createPackages } from './packages.mjs';
 import { makeSourceBindings, makeMapLike } from './bindings/source.mjs';
 import { makeJavaBindings } from './bindings/java.mjs';
+import { looksLikeHtml, evaluateSelector, selectIn, splitSelectorAttr } from './analyze/html.mjs';
 import { UsageError } from './rule.mjs';
 
 function readText(value) {
@@ -76,14 +77,35 @@ function applyRuleSuffix(value, suffix) {
     const out = evaluateRule(value, suffix);
     return { applied: true, info, value: out, missing: out === undefined };
   }
+  if (info.kind === 'selector' && looksLikeHtml(value)) {
+    const { selector, attr } = splitSelectorAttr(info.text);
+    // Legado 的选择器后缀：带 @属性 时取属性值；不带时返回匹配元素的 HTML，
+    // 这样 init 步骤窄化出的内容仍可被后续 `h1.0@text` 等规则继续选择。
+    const out = attr
+      ? evaluateSelector(value, info.text, true).join('')
+      : Array.from(selectIn(value, selector), (el) => el.html()).join('');
+    return { applied: true, info, value: out, missing: out === undefined || out === '' };
+  }
   return { applied: false, info };
 }
 
 function evaluatePlainRule(value, rule, store) {
   const text = String(rule ?? '').trim();
   if (text.startsWith('@get:')) return { value: store.get(text.slice(5).trim()), matched: true };
+  const _jp = text.match(/^@json:/i);
+  if (_jp) {
+    const _path = text.slice(_jp[0].length);
+    const _b = _path.split('##')[0].trim();
+    if (_b.startsWith('$') || isJsonText(value)) {
+      return { value: evaluateRule(value, _b), matched: true };
+    }
+    return { value, matched: true };
+  }
   const base = text.split('##')[0].trim();
   if (text.startsWith('$') || (isJsonText(value) && looksLikeJsonPath(base))) {
+    return { value: evaluateRule(value, text), matched: true };
+  }
+  if (looksLikeHtml(value)) {
     return { value: evaluateRule(value, text), matched: true };
   }
   return { value: rule, matched: false };
@@ -103,6 +125,10 @@ function sourceHeader(source) {
   const raw = source?.header;
   if (!raw) return {};
   if (typeof raw === 'object') return raw;
+  const _t = String(raw).trim();
+  if (_t.startsWith('@js:') || _t.startsWith('<js>') || _t.startsWith('@exec:') || _t.includes('{{')) {
+    return null;
+  }
   try {
     const parsed = JSON.parse(raw);
     return parsed && typeof parsed === 'object' ? parsed : {};
@@ -191,7 +217,7 @@ export function run(config) {
     offline,
     timeout: config.net?.timeout ?? 15000,
     ua: config.net?.ua,
-    defaultHeaders: sourceHeader(source),
+    defaultHeaders: sourceHeader(source) ?? {},
     charset: config.net?.charset,
     onCall(call) {
       events.push({ step: currentStep, type: 'net', ...call });
@@ -274,7 +300,14 @@ export function run(config) {
     activeResult = resultInput;
     const follow = step.follow ?? config.defaults?.follow ?? false;
 
-    sandbox.set('result', resultInput);
+    let resultBinding = resultInput;
+    if (step.rawResult && typeof resultInput === 'string') {
+      const _tr = resultInput.trim();
+      if ((_tr.startsWith('{') && _tr.endsWith('}')) || (_tr.startsWith('[') && _tr.endsWith(']'))) {
+        try { resultBinding = JSON.parse(_tr); } catch {}
+      }
+    }
+    sandbox.set('result', resultBinding);
     sandbox.set('baseUrl', baseUrl);
     sandbox.set('key', key);
     sandbox.set('page', page);
@@ -375,6 +408,7 @@ export function run(config) {
           if (text.startsWith('@get:')) return store.get(text.slice(5).trim());
           if (text.startsWith('@js:')) return sandbox.runExpression(text.slice(4));
           if (text.startsWith('@Json:')) return evaluateRuleString(resultInput, text.slice(6));
+          if (text.startsWith('@json:')) return evaluateRuleString(resultInput, text.slice(6));
           if (text.startsWith('@CSS:') || text.startsWith('@XPath:') || text.startsWith('//')) {
             throw new UsageError(`内嵌规则暂不支持选择器求值：${text}`);
           }
@@ -721,6 +755,18 @@ export function run(config) {
       return { chain: flowChain, error: true, summary };
     }
   };
+
+    // Lazy-evaluate dynamic header (@js:/<js>) once sandbox is ready
+  if (sourceHeader(source) === null) {
+    try {
+      const _ha = extractAtom(source?.header);
+      if (_ha && _ha.mode === 'js') {
+        const _hr = sandbox.runAtom(_ha.body);
+        const _ht = typeof _hr === 'string' ? _hr : String(_hr ?? '');
+        client.defaultHeaders = JSON.parse(_ht);
+      }
+    } catch (e) { /* header eval failed, continue without */ }
+  }
 
   for (const step of config.steps) {
     if (step.kind === 'flow') {
