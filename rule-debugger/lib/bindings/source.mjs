@@ -78,6 +78,23 @@ export function makeSourceBindings({ source, store, jar, hooks }) {
         return {};
       }
     },
+    getRule(key) {
+      if (!key) return '';
+      const k = String(key);
+      if (source && source[k] !== undefined) return String(source[k] ?? '');
+      const dotMap = { search:'ruleSearch', ruleSearch:'ruleSearch', bookinfo:'ruleBookInfo',
+        ruleBookInfo:'ruleBookInfo', toc:'ruleToc', ruleToc:'ruleToc',
+        content:'ruleContent', ruleContent:'ruleContent', review:'ruleReview', ruleReview:'ruleReview' };
+      const parts = k.split('.');
+      if (parts.length >= 2) {
+        const grp = dotMap[parts[0].toLowerCase()] || dotMap[parts[0]];
+        if (grp && source?.[grp]) {
+          const fld = source[grp][parts[1]];
+          if (fld !== undefined) return String(fld ?? '');
+        }
+      }
+      return '';
+    },
   };
 
   const cache = {
@@ -113,22 +130,27 @@ export function makeSourceBindings({ source, store, jar, hooks }) {
     },
   };
 
-  const makeVariableBag = () => {
+  // 变量存取挂为「非枚举」属性: runner 在 flow 模式切换书本时会执行
+  //   for (const k of Object.keys(book)) delete book[k];
+  // 来重置数据字段; 若 getVariable/putVariable 是可枚举自身属性, 会被一并删掉,
+  // 随后书源规则里的 book.getVariable("custom") 就抛 "is not a function".
+  // 非枚举属性不在 Object.keys 中, 既不会被 delete, 也不会被 Object.assign 覆盖.
+  const attachVariableBag = (obj) => {
     const bag = new Map();
-    return {
-      getVariable: (key) => (bag.has(String(key)) ? bag.get(String(key)) : ''),
-      putVariable: (key, value) => {
-        if (value === null || value === undefined) {
-          bag.delete(String(key));
-          return true;
-        }
-        bag.set(String(key), String(value));
-        return true;
-      },
-    };
+    const def = (name, fn) => Object.defineProperty(obj, name, {
+      value: fn, enumerable: false, configurable: true, writable: true,
+    });
+    def('getVariable', (key) => (bag.has(String(key)) ? bag.get(String(key)) : ''));
+    def('putVariable', (key, value) => {
+      if (value === null || value === undefined) { bag.delete(String(key)); return true; }
+      bag.set(String(key), String(value));
+      return true;
+    });
+    def('removeVariable', (key) => { bag.delete(String(key)); return true; });
+    return obj;
   };
 
-  const makeBook = (data = {}) => ({
+  const makeBook = (data = {}) => attachVariableBag({
     name: '',
     author: '',
     bookUrl: '',
@@ -136,15 +158,13 @@ export function makeSourceBindings({ source, store, jar, hooks }) {
     origin: '',
     originName: '',
     ...data,
-    ...makeVariableBag(),
   });
 
-  const makeChapter = (data = {}) => ({
+  const makeChapter = (data = {}) => attachVariableBag({
     title: '',
     url: '',
     index: 0,
     ...data,
-    ...makeVariableBag(),
   });
 
   return { source: sourceApi, cache, cookie, makeBook, makeChapter };
