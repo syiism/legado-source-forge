@@ -20,6 +20,7 @@ import {
   signedBytesOf,
 } from '../crypto.mjs';
 import { normalizeCharset } from '../net/charset.mjs';
+import { selectChain, evaluateSelector, looksLikeHtml } from '../analyze/html.mjs';
 
 export class UnsupportedApiError extends Error {
   constructor(api, hint) {
@@ -177,6 +178,29 @@ export function makeJavaBindings({ client, store, hooks, sourceApi, currentResul
     androidId: () => '9774d56d682e549c',
     getWebViewUA: () => DEFAULT_UA,
     randomUUID: () => randomUUID(),
+
+    getElement(rule) {
+      const html = currentResult();
+      if (!looksLikeHtml(html)) { warnOnce('getElement', 'java.getElement 当前 result 不是 HTML，返回空集合'); return selectChain('', String(rule ?? '')); }
+      return selectChain(html, String(rule ?? ''));
+    },
+    getElements(rule) {
+      const html = currentResult();
+      if (!looksLikeHtml(html)) { warnOnce('getElements', 'java.getElements 当前 result 不是 HTML，返回空集合'); return selectChain('', String(rule ?? '')); }
+      return selectChain(html, String(rule ?? ''));
+    },
+    getElementList(rule) {
+      const els = java.getElement(rule);
+      return Array.from(els);
+    },
+    getElementsList(rule) {
+      const els = java.getElements(rule);
+      return Array.from(els);
+    },
+    queryCss(rule) {
+      const html = currentResult();
+      return looksLikeHtml(html) ? evaluateSelector(html, String(rule ?? '')) : '';
+    },
 
     getSource: () => sourceApi,
     put: (key, value) => store.put(key, value),
